@@ -1,7 +1,7 @@
 {
   "name": "@allstak/react",
   "version": "0.1.1",
-  "description": "AllStak React SDK — <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak/browser.",
+  "description": "AllStak React SDK \u2014 <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak/browser.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -12,7 +12,11 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -22,7 +26,12 @@
   "bugs": {
     "url": "https://github.com/abdualziz-urnt/allstak-react/issues"
   },
-  "keywords": ["allstak", "observability", "react", "error-boundary"],
+  "keywords": [
+    "allstak",
+    "observability",
+    "react",
+    "error-boundary"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -33,8 +42,8 @@
     "react": ">=16.8.0"
   },
   "dependencies": {
-    "@allstak/browser": "^0.1.1",
-    "allstak-js": "^0.1.1"
+    "@allstak/browser": "github:abdualziz-urnt/allstak-browser",
+    "allstak-js": "github:abdualziz-urnt/allstak-js"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",
