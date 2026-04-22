@@ -1,7 +1,7 @@
 {
-  "name": "@allstak/react",
+  "name": "@allstak-io/react",
   "version": "0.1.1",
-  "description": "AllStak React SDK \u2014 <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak/browser.",
+  "description": "AllStak React SDK — <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak-io/browser.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -24,7 +24,7 @@
   },
   "homepage": "https://allstak.sa",
   "bugs": {
-    "url": "https://github.com/abdualziz-urnt/allstak-react/issues"
+    "url": "https://github.com/allstak-io/allstak-react/issues"
   },
   "keywords": [
     "allstak",
@@ -33,17 +33,19 @@
     "error-boundary"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom"
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom",
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "react": ">=16.8.0"
   },
   "dependencies": {
-    "@allstak/browser": "github:allstak-io/allstak-browser",
-    "allstak-js": "github:allstak-io/allstak-js"
+    "@allstak-io/browser": "github:allstak-io/allstak-browser",
+    "@allstak-io/allstak-js": "github:allstak-io/allstak-js"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

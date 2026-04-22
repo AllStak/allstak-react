@@ -1,8 +1,8 @@
 /**
- * @allstak/react — React-specific public API.
+ * @allstak-io/react — React-specific public API.
  *
- * Re-exports the React integration from allstak-js/react.
- * Components and hooks all rely on @allstak/browser being initialized first.
+ * Re-exports the React integration from @allstak-io/allstak-js/react.
+ * Components and hooks all rely on @allstak-io/browser being initialized first.
  */
 export {
   AllStakErrorBoundary,
@@ -10,4 +10,4 @@ export {
   useAllStak,
   withAllStakProfiler,
   AllStak,
-} from 'allstak-js/react';
+} from '@allstak-io/allstak-js/react';

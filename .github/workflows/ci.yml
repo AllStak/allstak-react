@@ -8,18 +8,31 @@ on:
 
 jobs:
   build:
-    name: Build (Node ${{ matrix.node }})
+    name: Build & Typecheck (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         node: ['18', '20', '22']
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@allstak-io'
           cache: 'npm'
-      - name: Use HTTPS for git deps (SSH blocked in CI)
+
+      - name: Use HTTPS for git deps
         run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-      - run: npm install
-      - run: npm run build
+
+      - name: Install dependencies
+        run: npm install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
