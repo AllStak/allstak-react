@@ -19,5 +19,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: 'npm'
+      - name: Use HTTPS for git deps (SSH blocked in CI)
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
       - run: npm install
       - run: npm run build

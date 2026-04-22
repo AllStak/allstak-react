@@ -19,6 +19,8 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
+      - name: Use HTTPS for git deps (SSH blocked in CI)
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
       - run: npm ci
       - run: npm run build
       - run: npm publish --access public --provenance
