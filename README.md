@@ -1,80 +1,133 @@
-# @allstak-io/react
+# @allstak/react
 
-AllStak React SDK — `<AllStakErrorBoundary>`, `useAllStak()` hook, and `withAllStakProfiler` HOC.
+**Drop-in error tracking for React. One `<AllStakErrorBoundary>`, zero config beyond your API key.**
 
-## Install
+[![npm version](https://img.shields.io/npm/v/@allstak/react.svg)](https://www.npmjs.com/package/@allstak/react)
+[![CI](https://github.com/allstak-io/allstak-react/actions/workflows/ci.yml/badge.svg)](https://github.com/allstak-io/allstak-react/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Auth required:** GitHub Packages requires a token with `read:packages` scope.
+Official AllStak SDK for React — error boundary component, hooks, and a profiler HOC on top of the browser SDK.
 
-### 1. Configure `.npmrc`
+## Dashboard
 
-```ini
-@allstak-io:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=YOUR_GITHUB_PAT
-```
+View captured events live at [app.allstak.sa](https://app.allstak.sa).
 
-### 2. Install
+![AllStak dashboard](https://app.allstak.sa/images/dashboard-preview.png)
+
+## Features
+
+- `<AllStakErrorBoundary>` component for render-tree error capture
+- `useAllStak()` hook for in-component capture and context
+- `withAllStakProfiler` HOC for mount/update timing
+- Inherits automatic fetch, console, and window error capture from the core SDK
+- Works with React 17, 18, and 19
+- Full TypeScript types
+
+## What You Get
+
+Once integrated, every event flows to your AllStak dashboard:
+
+- **Errors** — render-tree crashes, caught hook errors, stack traces with component names
+- **Logs** — console warnings and errors as structured breadcrumbs
+- **HTTP** — outbound `fetch` timing, status codes, failed calls
+- **Performance** — mount and update timing from the profiler HOC
+- **Alerts** — email and webhook notifications on regressions
+
+## Installation
 
 ```bash
-npm install @allstak-io/react@0.1.1 @allstak-io/browser@0.1.1
-# react >=16.8 is a peer dep — install separately if needed
+npm install @allstak/react
 ```
 
-## Usage
+## Quick Start
+
+> Create a project at [app.allstak.sa](https://app.allstak.sa) to get your API key.
 
 ```tsx
-import { AllStak } from '@allstak-io/browser';
-import { AllStakErrorBoundary, useAllStak } from '@allstak-io/react';
+import { AllStak, AllStakErrorBoundary } from '@allstak/react';
 
-// 1. Initialize once at app root
 AllStak.init({
-  apiKey: process.env.ALLSTAK_API_KEY!,
+  apiKey: import.meta.env.VITE_ALLSTAK_API_KEY,
   environment: 'production',
-  release: 'v1.0.0',
 });
 
-// 2. Wrap your component tree
-function App() {
+AllStak.captureException(new Error('test: hello from allstak-react'));
+
+export function App() {
   return (
     <AllStakErrorBoundary fallback={<p>Something went wrong.</p>}>
-      <MyApp />
+      <Routes />
     </AllStakErrorBoundary>
   );
 }
+```
 
-// 3. Manual capture inside components
-function MyComponent() {
+Load the app — the test error appears in your dashboard within seconds.
+
+## Get Your API Key
+
+1. Sign up at [app.allstak.sa](https://app.allstak.sa)
+2. Create a project
+3. Copy your API key from **Project Settings → API Keys**
+4. Export it as `ALLSTAK_API_KEY` or pass it to `AllStak.init(...)`
+
+## Configuration
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `apiKey` | `string` | yes | — | Project API key (`ask_live_…`) |
+| `environment` | `string` | no | — | Deployment env |
+| `release` | `string` | no | — | Version or git SHA |
+| `host` | `string` | no | `https://api.allstak.sa` | Ingest host override |
+| `user` | `{ id?, email? }` | no | — | Default user context |
+| `tags` | `Record<string,string>` | no | — | Default tags |
+
+## Example Usage
+
+Capture an error inside a component:
+
+```tsx
+import { useAllStak } from '@allstak/react';
+
+function CheckoutButton() {
   const allstak = useAllStak();
-
-  const handleClick = () => {
-    try {
-      riskyOperation();
-    } catch (err) {
-      allstak.captureException(err as Error);
-    }
-  };
-
-  return <button onClick={handleClick}>Do risky thing</button>;
+  return (
+    <button onClick={() => {
+      try { checkout(); }
+      catch (e) { allstak.captureException(e as Error); }
+    }}>Pay</button>
+  );
 }
 ```
 
-## API
+Wrap a component with the profiler:
 
-| Export | Description |
-|--------|-------------|
-| `AllStak` | Re-exported from `@allstak-io/browser` — use to init |
-| `AllStakErrorBoundary` | React error boundary; catches component-tree errors |
-| `AllStakErrorBoundaryProps` | Props type for the boundary |
-| `useAllStak()` | Hook returning `{ captureException, captureMessage, setUser, setTag }` |
-| `withAllStakProfiler(Component)` | HOC that wraps a component in the profiler |
+```tsx
+import { withAllStakProfiler } from '@allstak/react';
+export default withAllStakProfiler(Dashboard, { name: 'Dashboard' });
+```
 
-## GitHub Packages
+Set user context on login:
 
-- **Package:** `@allstak-io/react`
-- **Registry:** `https://npm.pkg.github.com`
-- **Repo:** [github.com/allstak-io/allstak-react](https://github.com/allstak-io/allstak-react)
-- **Releases:** [github.com/allstak-io/allstak-react/releases](https://github.com/allstak-io/allstak-react/releases)
+```tsx
+import { AllStak } from '@allstak/react';
+AllStak.setUser({ id: user.id, email: user.email });
+```
 
-## Versioning
+## Production Endpoint
 
-Tags must match `package.json` version exactly (e.g. `v0.1.1`). The release workflow fails if there's a mismatch.
+Production endpoint: `https://api.allstak.sa`. Override via `host` for self-hosted installs:
+
+```tsx
+AllStak.init({ apiKey: '...', host: 'https://allstak.mycorp.com' });
+```
+
+## Links
+
+- Documentation: https://docs.allstak.sa
+- Dashboard: https://app.allstak.sa
+- Source: https://github.com/allstak-io/allstak-react
+
+## License
+
+MIT © AllStak
