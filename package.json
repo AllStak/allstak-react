@@ -1,6 +1,6 @@
 {
-  "name": "@allstak-io/react",
-  "version": "0.1.1",
+  "name": "@allstak/react",
+  "version": "0.1.3",
   "description": "AllStak React SDK — <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak-io/browser.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -34,7 +34,7 @@
   ],
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom",
@@ -44,8 +44,8 @@
     "react": ">=16.8.0"
   },
   "dependencies": {
-    "@allstak-io/browser": "github:allstak-io/allstak-browser",
-    "@allstak-io/allstak-js": "github:allstak-io/allstak-js"
+    "@allstak/browser": "^0.1.3",
+    "@allstak/js": "^0.1.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",
