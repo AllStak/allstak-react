@@ -1,7 +1,7 @@
 {
-  "name": "@allstak-io/react",
-  "version": "0.1.1",
-  "description": "AllStak React SDK — <AllStakErrorBoundary>, useAllStak() hook, withAllStakProfiler HOC. Depends on @allstak-io/browser.",
+  "name": "@allstak/react",
+  "version": "0.1.4",
+  "description": "AllStak React SDK — standalone error tracking, breadcrumbs, ErrorBoundary, useAllStak hook, and withAllStakProfiler HOC. No @allstak/* runtime dependencies.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -20,32 +20,30 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/allstak-io/allstak-react.git"
+    "url": "https://github.com/AllStak/allstak-react.git"
   },
   "homepage": "https://allstak.sa",
   "bugs": {
-    "url": "https://github.com/allstak-io/allstak-react/issues"
+    "url": "https://github.com/AllStak/allstak-react/issues"
   },
   "keywords": [
     "allstak",
     "observability",
     "react",
-    "error-boundary"
+    "error-tracking",
+    "apm"
   ],
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "peerDependencies": {
     "react": ">=16.8.0"
-  },
-  "dependencies": {
-    "@allstak-io/browser": "github:allstak-io/allstak-browser",
-    "@allstak-io/allstak-js": "github:allstak-io/allstak-js"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",
