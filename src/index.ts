@@ -17,6 +17,8 @@ import { AllStak } from './client';
 export { AllStak } from './client';
 export type { AllStakConfig, Breadcrumb } from './client';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION } from './client';
+export { instrumentBrowserNavigation } from './navigation';
+export { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
 
 export interface AllStakErrorBoundaryProps {
   children: React.ReactNode;

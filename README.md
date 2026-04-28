@@ -122,6 +122,56 @@ Production endpoint: `https://api.allstak.sa`. Override via `host` for self-host
 AllStak.init({ apiKey: '...', host: 'https://allstak.mycorp.com' });
 ```
 
+## Source maps
+
+Production stack traces are minified — to see real function names and
+line numbers in the AllStak dashboard you need to upload the source maps
+that your bundler emits. The CLI lives in `@allstak/js/sourcemaps`; you
+do **not** need to install `@allstak/js` as a runtime dependency, only
+as a `devDependency` for the build step.
+
+### Vite
+
+```bash
+npm install -D @allstak/js
+```
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { allstakSourcemaps } from '@allstak/js/vite';
+
+export default defineConfig({
+  build: { sourcemap: 'hidden' },
+  plugins: [
+    allstakSourcemaps({
+      release: process.env.RELEASE!,
+      token: process.env.ALLSTAK_UPLOAD_TOKEN!,
+    }),
+  ],
+});
+```
+
+### Webpack / Next / generic
+
+The plugin exists for `@allstak/js/webpack` and `@allstak/js/next`; for
+any other bundler call the underlying API after your build:
+
+```ts
+import { processBuildOutput } from '@allstak/js/sourcemaps';
+
+await processBuildOutput({
+  dir: 'dist',
+  release: process.env.RELEASE!,
+  token: process.env.ALLSTAK_UPLOAD_TOKEN!,
+});
+```
+
+This injects a stable `debugId` into every chunk and uploads the matching
+`.map`. The runtime resolver in `@allstak/react` reads `globalThis._allstakDebugIds`
+to attach the right debug-id to each captured frame, so the symbolicator
+picks the correct map even after long-tail caching of bundles.
+
 ## Links
 
 - Documentation: https://docs.allstak.sa
