@@ -12,7 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: ['18', '20', '22']
+        # Node 20+ — jsdom (used by the RTL ErrorBoundary integration test)
+        # depends on encoding-lite which dropped CJS support and stopped
+        # supporting Node 18 in late 2025.
+        node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
 
