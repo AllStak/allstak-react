@@ -3,7 +3,7 @@
 **Drop-in error tracking for React. One `<AllStakErrorBoundary>`, zero config beyond your API key.**
 
 [![npm version](https://img.shields.io/npm/v/@allstak/react.svg)](https://www.npmjs.com/package/@allstak/react)
-[![CI](https://github.com/allstak-io/allstak-react/actions/workflows/ci.yml/badge.svg)](https://github.com/allstak-io/allstak-react/actions)
+[![CI](https://github.com/AllStak/allstak-react/actions/workflows/ci.yml/badge.svg)](https://github.com/AllStak/allstak-react/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Official AllStak SDK for React — error boundary component, hooks, and a profiler HOC on top of the browser SDK.
@@ -176,7 +176,7 @@ picks the correct map even after long-tail caching of bundles.
 
 - Documentation: https://docs.allstak.sa
 - Dashboard: https://app.allstak.sa
-- Source: https://github.com/allstak-io/allstak-react
+- Source: https://github.com/AllStak/allstak-react
 
 ## License
 
