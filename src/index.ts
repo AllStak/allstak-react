@@ -16,9 +16,11 @@ import { AllStak } from './client';
 
 export { AllStak } from './client';
 export type { AllStakConfig, Breadcrumb } from './client';
-export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION } from './client';
-export { instrumentBrowserNavigation } from './navigation';
+export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope } from './client';
+export { instrumentBrowserNavigation, instrumentReactRouter, instrumentNextRouter } from './navigation';
 export { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
+export { ReplayRecorder } from './replay';
+export type { ReplayOptions } from './replay';
 
 export interface AllStakErrorBoundaryProps {
   children: React.ReactNode;

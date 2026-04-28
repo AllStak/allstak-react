@@ -55,3 +55,58 @@ export function instrumentBrowserNavigation(addBreadcrumb: AddBreadcrumbFn): voi
 
   (history as any)[FLAG] = true;
 }
+
+/**
+ * React Router v6+ helper. Pass a `Location` object whenever the app's
+ * top-level `useLocation()` value changes — usually inside a small effect
+ * in the route layout. No hard dependency on `react-router-dom`.
+ *
+ *   import { useLocation } from 'react-router-dom';
+ *   import { instrumentReactRouter } from '@allstak/react';
+ *   useEffect(() => instrumentReactRouter(useLocation()), [useLocation()]);
+ *
+ * Each call records a `navigation` breadcrumb if the path differs from
+ * the last one we saw. Idempotent on the same path.
+ */
+let lastReactRouterPath: string | undefined;
+export function instrumentReactRouter(
+  location: { pathname: string; search?: string },
+  addBreadcrumb: AddBreadcrumbFn = (...args) => __defaultBreadcrumb(...args),
+): void {
+  const next = `${location.pathname}${location.search ?? ''}`;
+  if (next === lastReactRouterPath) return;
+  const from = lastReactRouterPath ?? '<initial>';
+  lastReactRouterPath = next;
+  try { addBreadcrumb('navigation', `${from} -> ${next}`, 'info', { router: 'react-router', from, to: next }); }
+  catch { /* ignore */ }
+}
+
+/**
+ * Next.js (Pages router) helper. Hook into `router.events.on('routeChangeComplete', ...)`
+ * inside `_app.tsx` and call this with the new URL. No hard dependency on `next`.
+ *
+ *   import Router from 'next/router';
+ *   import { instrumentNextRouter } from '@allstak/react';
+ *   Router.events.on('routeChangeComplete', (url) => instrumentNextRouter(url));
+ *
+ * For the Next.js App Router, instead use `usePathname()` + `useSearchParams()`
+ * and call `instrumentReactRouter({ pathname, search })`.
+ */
+let lastNextPath: string | undefined;
+export function instrumentNextRouter(
+  url: string,
+  addBreadcrumb: AddBreadcrumbFn = (...args) => __defaultBreadcrumb(...args),
+): void {
+  if (url === lastNextPath) return;
+  const from = lastNextPath ?? '<initial>';
+  lastNextPath = url;
+  try { addBreadcrumb('navigation', `${from} -> ${url}`, 'info', { router: 'next', from, to: url }); }
+  catch { /* ignore */ }
+}
+
+// Default forwarder — set by the client at init so callers can pass `addBreadcrumb`
+// implicitly. Avoids a circular import on `./client`.
+let __defaultBreadcrumb: AddBreadcrumbFn = () => {};
+export function __setDefaultBreadcrumbForwarder(fn: AddBreadcrumbFn): void {
+  __defaultBreadcrumb = fn;
+}

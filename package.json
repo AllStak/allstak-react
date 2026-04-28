@@ -1,6 +1,6 @@
 {
   "name": "@allstak/react",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "AllStak React SDK — standalone error tracking, breadcrumbs, ErrorBoundary, useAllStak hook, and withAllStakProfiler HOC. No @allstak/* runtime dependencies.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
