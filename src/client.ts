@@ -16,10 +16,13 @@ import { Scope, mergeScopes } from './scope';
 import { TracingModule, Span } from './tracing';
 import { ReplayRecorder, ReplayOptions } from './replay';
 import { resolveDebugId } from './debug-id';
+import { HttpRequestModule } from './http-requests';
+import type { HttpTrackingOptions } from './http-redact';
+import { installHttpInstrumentation } from './http-instrumentation';
 
 export const INGEST_HOST = 'https://api.allstak.sa';
 export const SDK_NAME = 'allstak-react';
-export const SDK_VERSION = '0.2.1';
+export const SDK_VERSION = '0.3.0';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
@@ -75,6 +78,17 @@ export interface AllStakConfig {
    * the full privacy contract.
    */
   replay?: ReplayOptions;
+  /**
+   * Auto-instrument outbound HTTP — wraps `fetch`, `XMLHttpRequest`, and
+   * (when present) `axios`. Default: false.
+   */
+  enableHttpTracking?: boolean;
+  /**
+   * Privacy + capture controls for HTTP instrumentation. Bodies and
+   * headers are OFF by default; auth headers and sensitive query params
+   * are ALWAYS redacted.
+   */
+  httpTracking?: HttpTrackingOptions;
   /**
    * Probability in [0, 1] that any given error is sent. Default: 1 (no sampling).
    * Applied per event before {@link beforeSend}.
@@ -167,6 +181,8 @@ export class AllStakClient {
   private scopeStack: Scope[] = [];
   private tracing: TracingModule;
   private replay: ReplayRecorder | null = null;
+  private httpRequests: HttpRequestModule | null = null;
+  private _instrumentAxios: ((axios: any) => any) | null = null;
   private onErrorHandler: ((ev: ErrorEvent) => void) | null = null;
   private onRejectionHandler: ((ev: PromiseRejectionEvent) => void) | null = null;
 
@@ -211,6 +227,36 @@ export class AllStakClient {
         this.replay.start();
       } catch { /* never break init */ }
     }
+    if (config.enableHttpTracking) {
+      try {
+        this.httpRequests = new HttpRequestModule(this.transport);
+        this.httpRequests.setDefaults({
+          environment: this.config.environment,
+          release: this.config.release,
+          dist: this.config.dist,
+          platform: this.config.platform,
+          sdkName: this.config.sdkName,
+          sdkVersion: this.config.sdkVersion,
+        });
+        const { instrumentAxios } = installHttpInstrumentation(
+          this.httpRequests,
+          config.httpTracking ?? {},
+          baseUrl,
+        );
+        this._instrumentAxios = instrumentAxios;
+      } catch { /* never break init */ }
+    }
+  }
+
+  /** Manually instrument an axios instance. No-op when HTTP tracking is off. */
+  instrumentAxios<T = any>(axios: T): T {
+    if (!this._instrumentAxios) return axios;
+    return this._instrumentAxios(axios) as T;
+  }
+
+  /** Snapshot of recent failed HTTP requests for error-linking. */
+  getRecentFailedHttp() {
+    return this.httpRequests?.getRecentFailed() ?? [];
   }
 
   captureException(error: Error, context?: Record<string, unknown>): void {
@@ -233,13 +279,18 @@ export class AllStakClient {
       error.constructor?.name ||
       'Error';
     const eff = this.effective();
-    // Auto-attach the active trace/span so the error groups with the
-    // surrounding tracing context server-side.
     const traceContext: Record<string, unknown> = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
+    const recentFailed = this.httpRequests?.getRecentFailed() ?? [];
+    if (recentFailed.length > 0) {
+      traceContext['http.recentFailed'] = recentFailed.map((r) => ({
+        method: r.method, url: r.url, statusCode: r.statusCode,
+        durationMs: r.durationMs, error: r.error,
+      }));
+    }
 
     const payload: ErrorIngestPayload = {
       exceptionClass,
@@ -389,6 +440,8 @@ export class AllStakClient {
     this.onRejectionHandler = null;
     this.tracing.destroy();
     if (this.replay) { this.replay.destroy(); this.replay = null; }
+    if (this.httpRequests) { this.httpRequests.destroy(); this.httpRequests = null; }
+    this._instrumentAxios = null;
     this.breadcrumbs = [];
   }
 
@@ -580,6 +633,8 @@ export const AllStak = {
   setTraceId(traceId: string): void { ensureInit().setTraceId(traceId); },
   getCurrentSpanId(): string | null { return ensureInit().getCurrentSpanId(); },
   resetTrace(): void { ensureInit().resetTrace(); },
+  /** Manually instrument an axios instance. No-op when HTTP tracking is off. */
+  instrumentAxios<T = any>(axios: T): T { return ensureInit().instrumentAxios(axios); },
   getSessionId(): string { return ensureInit().getSessionId(); },
   getConfig(): AllStakConfig | null { return instance?.getConfig() ?? null; },
   destroy(): void { instance?.destroy(); instance = null; },

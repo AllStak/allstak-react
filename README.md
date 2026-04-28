@@ -114,6 +114,49 @@ import { AllStak } from '@allstak/react';
 AllStak.setUser({ id: user.id, email: user.email });
 ```
 
+## HTTP tracking
+
+Setting `enableHttpTracking: true` (off by default) auto-wraps `fetch`,
+`XMLHttpRequest`, and `axios` (when installed) so every outbound HTTP
+call is recorded as an `http_request` event.
+
+**Privacy defaults are aggressive:**
+
+- request/response bodies are **not** captured
+- headers are **not** captured
+- `Authorization`, `Cookie`, `Set-Cookie`, `X-API-Key`, `X-Auth-Token`,
+  `Proxy-Authorization` are **always** redacted
+- query params named `token`, `password`, `api_key`, `apikey`,
+  `authorization`, `auth`, `secret`, `access_token`, `refresh_token`,
+  `session`, `sessionid`, `jwt` are **always** redacted in the URL
+
+To enable richer capture (only on routes you control):
+
+```ts
+AllStak.init({
+  apiKey: '...',
+  enableHttpTracking: true,
+  httpTracking: {
+    captureRequestBody: true,
+    captureResponseBody: true,
+    captureHeaders: true,             // auth headers still hard-redacted
+    redactHeaders: ['x-tenant'],
+    redactQueryParams: ['custom_id'],
+    ignoredUrls: [/health/i, '/metrics'],
+    allowedUrls: [],
+    maxBodyBytes: 4096,
+  },
+});
+
+// axios with custom adapter (rare):
+import axios from 'axios';
+const api = AllStak.instrumentAxios(axios.create({ baseURL: 'https://api.example.com' }));
+```
+
+When an exception fires after a failed request, the most recent failed
+HTTP requests (last 10) are automatically attached to the error
+metadata under `http.recentFailed` for easy triage.
+
 ## Production Endpoint
 
 Production endpoint: `https://api.allstak.sa`. Override via `host` for self-hosted installs:

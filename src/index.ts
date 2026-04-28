@@ -21,6 +21,9 @@ export { instrumentBrowserNavigation, instrumentReactRouter, instrumentNextRoute
 export { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
 export { ReplayRecorder } from './replay';
 export type { ReplayOptions } from './replay';
+export type { HttpTrackingOptions } from './http-redact';
+export { HttpRequestModule } from './http-requests';
+export type { HttpRequestEvent } from './http-requests';
 
 export interface AllStakErrorBoundaryProps {
   children: React.ReactNode;
