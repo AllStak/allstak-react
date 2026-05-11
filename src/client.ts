@@ -19,10 +19,12 @@ import { resolveDebugId } from './debug-id';
 import { HttpRequestModule } from './http-requests';
 import type { HttpTrackingOptions } from './http-redact';
 import { installHttpInstrumentation } from './http-instrumentation';
+import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
+import { startWebVitals, WebVitalsHandle } from './web-vitals';
 
 export const INGEST_HOST = 'https://api.allstak.sa';
 export const SDK_NAME = 'allstak-react';
-export const SDK_VERSION = '0.3.0';
+export const SDK_VERSION = '0.3.1';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
@@ -67,8 +69,22 @@ export interface AllStakConfig {
   autoCaptureBrowserErrors?: boolean;
   /** Wrap `globalThis.fetch` to record HTTP breadcrumbs. Default: true */
   autoBreadcrumbsFetch?: boolean;
-  /** Wrap `console.warn` and `console.error` to record log breadcrumbs. Default: true */
+  /** Wrap `console.*` methods to record log breadcrumbs. Default: true.
+   * Per-method capture is controlled by `captureConsole` (warn + error
+   * default on, log + info default off). */
   autoBreadcrumbsConsole?: boolean;
+  /**
+   * Per-console-method capture flags. Defaults: warn + error captured,
+   * log + info NOT captured (to avoid breadcrumb spam from typical app
+   * logging). Set `{ log: true, info: true }` to opt-in.
+   */
+  captureConsole?: ConsoleCaptureOptions;
+  /**
+   * Auto-capture Web Vitals (CLS, LCP, INP, FCP, TTFB) via the browser's
+   * PerformanceObserver. Default: true. Each metric ships as a
+   * `web_vitals` log on the next backend flush.
+   */
+  autoWebVitals?: boolean;
   /** Wrap `history.pushState`/`replaceState` and listen to `popstate` for SPA navigation breadcrumbs. Default: true */
   autoBreadcrumbsNavigation?: boolean;
   /**
@@ -185,6 +201,7 @@ export class AllStakClient {
   private _instrumentAxios: ((axios: any) => any) | null = null;
   private onErrorHandler: ((ev: ErrorEvent) => void) | null = null;
   private onRejectionHandler: ((ev: PromiseRejectionEvent) => void) | null = null;
+  private webVitals: WebVitalsHandle | null = null;
 
   constructor(config: AllStakConfig) {
     if (!config.apiKey) throw new Error('AllStak: config.apiKey is required');
@@ -214,12 +231,37 @@ export class AllStakClient {
       catch { /* ignore — never break init */ }
     }
     if (config.autoBreadcrumbsConsole !== false) {
-      try { instrumentConsole(safeAddBreadcrumb); }
+      try { instrumentConsole(safeAddBreadcrumb, config.captureConsole); }
       catch { /* ignore */ }
     }
     if (config.autoBreadcrumbsNavigation !== false) {
       try { instrumentBrowserNavigation(safeAddBreadcrumb); }
       catch { /* ignore */ }
+    }
+    if (config.autoWebVitals !== false) {
+      try {
+        const send = (m: { name: string; value: number; id?: string }) => {
+          this.transport.send(LOGS_PATH, {
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: `web-vital:${m.name}=${m.value.toFixed(2)}`,
+            sessionId: this.sessionId,
+            environment: this.config.environment,
+            release: this.config.release,
+            platform: this.config.platform,
+            sdkName: this.config.sdkName,
+            sdkVersion: this.config.sdkVersion,
+            metadata: {
+              category: 'web-vital',
+              name: m.name,
+              value: m.value,
+              ...(m.id ? { id: m.id } : {}),
+              ...this.releaseTags(),
+            },
+          });
+        };
+        this.webVitals = startWebVitals(send);
+      } catch { /* never break init */ }
     }
     if (config.replay && (config.replay.enabled ?? true)) {
       try {
@@ -441,6 +483,7 @@ export class AllStakClient {
     this.tracing.destroy();
     if (this.replay) { this.replay.destroy(); this.replay = null; }
     if (this.httpRequests) { this.httpRequests.destroy(); this.httpRequests = null; }
+    if (this.webVitals) { this.webVitals.destroy(); this.webVitals = null; }
     this._instrumentAxios = null;
     this.breadcrumbs = [];
   }

@@ -3,9 +3,23 @@
  *
  * Self-contained: no @allstak/js or @allstak-io/* dependencies. Ships its own
  * AllStak client (init/capture/breadcrumbs/transport) plus React-specific
- * helpers (ErrorBoundary, useAllStak hook, withAllStakProfiler HOC).
+ * helpers (Provider, ErrorBoundary, useAllStak hook, withAllStakProfiler HOC).
  *
- * Usage:
+ * Recommended usage (one-liner):
+ *
+ *   import { AllStakProvider } from '@allstak/react';
+ *
+ *   export function App() {
+ *     return (
+ *       <AllStakProvider apiKey="ask_live_..." environment="production" debug>
+ *         <AppRoot />
+ *       </AllStakProvider>
+ *     );
+ *   }
+ *
+ * Advanced / manual usage:
+ *
+ *   import { AllStak } from '@allstak/react';
  *   AllStak.init({ apiKey, environment, release });
  *   <AllStakErrorBoundary>...</AllStakErrorBoundary>
  *   const { captureException } = useAllStak();
@@ -14,16 +28,40 @@
 import * as React from 'react';
 import { AllStak } from './client';
 
+// ── Primary API: AllStakProvider (recommended) ──────────────────
+export {
+  AllStakProvider,
+  useAllStak,
+  __resetProviderInstanceForTest,
+} from './provider';
+export type { AllStakProviderProps } from './provider';
+
+// ── Core client + manual setup ──────────────────────────────────
 export { AllStak } from './client';
 export type { AllStakConfig, Breadcrumb } from './client';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope } from './client';
+
+// ── Navigation helpers ──────────────────────────────────────────
 export { instrumentBrowserNavigation, instrumentReactRouter, instrumentNextRouter } from './navigation';
-export { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
+
+// ── Auto-breadcrumb helpers ─────────────────────────────────────
+export { instrumentFetch, instrumentConsole, __resetConsoleInstrumentationFlagForTest } from './auto-breadcrumbs';
+export type { ConsoleCaptureOptions } from './auto-breadcrumbs';
+
+// ── Web Vitals ──────────────────────────────────────────────────
+export { startWebVitals, __resetWebVitalsFlagForTest } from './web-vitals';
+export type { WebVitalsHandle } from './web-vitals';
+
+// ── Replay surrogate ────────────────────────────────────────────
 export { ReplayRecorder } from './replay';
 export type { ReplayOptions } from './replay';
+
+// ── HTTP tracking ───────────────────────────────────────────────
 export type { HttpTrackingOptions } from './http-redact';
 export { HttpRequestModule } from './http-requests';
 export type { HttpRequestEvent } from './http-requests';
+
+// ── ErrorBoundary (legacy standalone — provider's boundary is preferred) ──
 
 export interface AllStakErrorBoundaryProps {
   children: React.ReactNode;
@@ -85,34 +123,8 @@ export class AllStakErrorBoundary extends React.Component<
 }
 
 /**
- * Convenience hook — exposes the most common capture/context APIs with a
- * stable identity so components don't have to import the namespace.
- */
-export function useAllStak() {
-  return React.useMemo(
-    () => ({
-      captureException: (error: Error, ctx?: Record<string, unknown>) =>
-        AllStak.captureException(error, ctx),
-      captureMessage: (
-        msg: string,
-        level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
-      ) => AllStak.captureMessage(msg, level),
-      setUser: (user: { id?: string; email?: string }) => AllStak.setUser(user),
-      setTag: (key: string, value: string) => AllStak.setTag(key, value),
-      addBreadcrumb: (
-        type: string,
-        message: string,
-        level?: string,
-        data?: Record<string, unknown>,
-      ) => AllStak.addBreadcrumb(type, message, level, data),
-    }),
-    [],
-  );
-}
-
-/**
- * HOC: drops a navigation breadcrumb when a component mounts. Useful for
- * marking screen boundaries without a router.
+ * HOC: drops a navigation breadcrumb when a component mounts. Useful
+ * for marking screen boundaries without a router.
  */
 export function withAllStakProfiler<P extends object>(
   Component: React.ComponentType<P>,

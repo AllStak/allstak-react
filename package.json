@@ -1,6 +1,6 @@
 {
   "name": "@allstak/react",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AllStak React SDK — standalone error tracking, breadcrumbs, ErrorBoundary, useAllStak hook, and withAllStakProfiler HOC. No @allstak/* runtime dependencies.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -10,11 +10,32 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./sourcemaps": {
+      "types": "./dist/build/sourcemaps.d.ts",
+      "import": "./dist/build/sourcemaps.mjs",
+      "require": "./dist/build/sourcemaps.js"
+    },
+    "./vite": {
+      "types": "./dist/build/vite.d.ts",
+      "import": "./dist/build/vite.mjs",
+      "require": "./dist/build/vite.js"
+    },
+    "./webpack": {
+      "types": "./dist/build/webpack.d.ts",
+      "import": "./dist/build/webpack.mjs",
+      "require": "./dist/build/webpack.js"
+    },
+    "./next": {
+      "types": "./dist/build/next.d.ts",
+      "import": "./dist/build/next.mjs",
+      "require": "./dist/build/next.js"
     }
   },
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -38,7 +59,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom",
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom && tsup src/build/sourcemaps.ts src/build/vite.ts src/build/webpack.ts src/build/next.ts --format esm,cjs --dts --sourcemap --platform node --out-dir dist/build --external react --external react-dom",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
@@ -47,10 +68,12 @@
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
+    "@types/node": "^25.6.0",
     "@types/react": "^18.3.0",
     "jsdom": "^29.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.1",
+    "react-test-renderer": "^18.3.1",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0"
   }

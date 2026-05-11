@@ -73,30 +73,124 @@ export function instrumentFetch(
   g.fetch = wrapped;
 }
 
-export function instrumentConsole(addBreadcrumb: AddBreadcrumbFn): void {
+/**
+ * Per-console-method capture flags. Defaults: warn + error captured,
+ * log + info NOT captured (typical React apps emit thousands of debug
+ * lines per session — flooding the dashboard with them creates pure
+ * noise, so they're opt-in).
+ *
+ *   <AllStakProvider captureConsole={{ log: true, info: true }} />
+ */
+export interface ConsoleCaptureOptions {
+  log?: boolean;
+  info?: boolean;
+  warn?: boolean;
+  error?: boolean;
+}
+
+const CONSOLE_DEFAULTS: Required<ConsoleCaptureOptions> = {
+  log: false,
+  info: false,
+  warn: true,
+  error: true,
+};
+
+const CONSOLE_METHOD_TO_LEVEL: Record<keyof ConsoleCaptureOptions, string> = {
+  log: 'info',
+  info: 'info',
+  warn: 'warn',
+  error: 'error',
+};
+
+/** Max bytes per stringified arg. Anything longer is suffixed with `…[truncated]`. */
+const MAX_ARG_BYTES = 5000;
+
+export function instrumentConsole(
+  addBreadcrumb: AddBreadcrumbFn,
+  options: ConsoleCaptureOptions = {},
+): void {
   if (typeof console === 'undefined') return;
   if ((console as any)[CONSOLE_FLAG]) return;
 
-  const origWarn = console.warn;
-  const origError = console.error;
+  const opts: Required<ConsoleCaptureOptions> = {
+    log: options.log ?? CONSOLE_DEFAULTS.log,
+    info: options.info ?? CONSOLE_DEFAULTS.info,
+    warn: options.warn ?? CONSOLE_DEFAULTS.warn,
+    error: options.error ?? CONSOLE_DEFAULTS.error,
+  };
 
-  console.warn = function (...args: unknown[]) {
-    try { addBreadcrumb('log', args.map(safeString).join(' '), 'warn'); }
-    catch { /* never break host */ }
-    return origWarn.apply(console, args);
+  const wrap = (method: keyof ConsoleCaptureOptions): void => {
+    const orig = (console as any)[method];
+    if (typeof orig !== 'function') return;
+    const level = CONSOLE_METHOD_TO_LEVEL[method];
+    (console as any)[method] = function (...args: unknown[]) {
+      if (opts[method]) {
+        try {
+          const serialized = args.map(safeStringifyArg);
+          const message = truncate(serialized.join(' '));
+          addBreadcrumb('log', message, level, {
+            category: 'console',
+            method,
+            args: serialized,
+          });
+        } catch { /* never break host */ }
+      }
+      return orig.apply(console, args);
+    };
   };
-  console.error = function (...args: unknown[]) {
-    try { addBreadcrumb('log', args.map(safeString).join(' '), 'error'); }
-    catch { /* never break host */ }
-    return origError.apply(console, args);
-  };
+
+  if (opts.log) wrap('log');
+  if (opts.info) wrap('info');
+  if (opts.warn) wrap('warn');
+  if (opts.error) wrap('error');
+
   (console as any)[CONSOLE_FLAG] = true;
 }
 
-function safeString(v: unknown): string {
-  if (v == null) return String(v);
-  if (typeof v === 'string') return v;
-  if (v instanceof Error) return `${v.name}: ${v.message}`;
-  try { return typeof v === 'object' ? JSON.stringify(v) : String(v); }
-  catch { return Object.prototype.toString.call(v); }
+/** @internal — for tests. Resets the wrap-once flag. */
+export function __resetConsoleInstrumentationFlagForTest(): void {
+  if (typeof console !== 'undefined') {
+    delete (console as any)[CONSOLE_FLAG];
+  }
 }
+
+/**
+ * Safely stringify a single console arg. Handles primitives, Errors,
+ * arrays, plain objects, and circular references. Falls back to
+ * Object.prototype.toString.call(v) on any failure.
+ */
+function safeStringifyArg(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
+  if (typeof v === 'symbol') return v.toString();
+  if (typeof v === 'function') return `[Function${v.name ? ` ${v.name}` : ''}]`;
+  if (v instanceof Error) {
+    return `${v.name || 'Error'}: ${v.message}${v.stack ? `\n${v.stack}` : ''}`;
+  }
+  if (typeof v === 'object') {
+    try {
+      const seen = new WeakSet<object>();
+      const out = JSON.stringify(v, (_key, val) => {
+        if (typeof val === 'object' && val !== null) {
+          if (seen.has(val as object)) return '[Circular]';
+          seen.add(val as object);
+        }
+        if (typeof val === 'bigint') return val.toString();
+        if (typeof val === 'function') return `[Function${val.name ? ` ${val.name}` : ''}]`;
+        if (typeof val === 'symbol') return val.toString();
+        return val;
+      });
+      return out ?? Object.prototype.toString.call(v);
+    } catch {
+      return Object.prototype.toString.call(v);
+    }
+  }
+  return String(v);
+}
+
+function truncate(s: string): string {
+  if (s.length <= MAX_ARG_BYTES) return s;
+  return s.slice(0, MAX_ARG_BYTES) + '…[truncated]';
+}
+
