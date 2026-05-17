@@ -21,6 +21,7 @@ export type { UploadOptions, UploadResult } from './upload';
 export { uploadPair, uploadAll, DEFAULT_HOST } from './upload';
 
 import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { findPairs } from './walk';
 import { injectAll } from './inject';
 import { uploadAll, type UploadOptions, type UploadResult } from './upload';
@@ -70,8 +71,11 @@ export async function processBuildOutput(opts: ProcessOptions): Promise<ProcessR
     log(`  ${i.bundleName}  ${i.debugId}  ${i.reused ? '(reused)' : '(new)'}`);
   }
 
-  const token = opts.token ?? process.env.ALLSTAK_UPLOAD_TOKEN;
-  const release = opts.release ?? process.env.ALLSTAK_RELEASE;
+  const env = loadAllStakEnv();
+  const token = opts.token ?? env.ALLSTAK_UPLOAD_TOKEN;
+  const release = opts.release ?? env.ALLSTAK_RELEASE;
+  const host = opts.host ?? env.ALLSTAK_HOST;
+  const dist = opts.dist ?? env.ALLSTAK_DIST;
 
   if (opts.injectOnly || !token) {
     if (!opts.injectOnly && !token) {
@@ -88,6 +92,8 @@ export async function processBuildOutput(opts: ProcessOptions): Promise<ProcessR
     ...opts,
     release,
     token,
+    host,
+    dist,
   });
   for (const u of uploaded) {
     if (u.ok) {
@@ -98,4 +104,23 @@ export async function processBuildOutput(opts: ProcessOptions): Promise<ProcessR
     }
   }
   return { dir, pairs: pairs.length, injected, uploaded };
+}
+
+function loadAllStakEnv(): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = { ...process.env };
+  for (const file of ['.env.local', '.env']) {
+    const full = resolve(process.cwd(), file);
+    if (!existsSync(full)) continue;
+    const text = readFileSync(full, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = /^([A-Z0-9_]+)\s*=\s*(.*)$/.exec(trimmed);
+      if (!match) continue;
+      const key = match[1]!;
+      if (out[key] !== undefined) continue;
+      out[key] = match[2]!.replace(/^['"]|['"]$/g, '');
+    }
+  }
+  return out;
 }

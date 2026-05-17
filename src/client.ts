@@ -24,7 +24,7 @@ import { startWebVitals, WebVitalsHandle } from './web-vitals';
 
 export const INGEST_HOST = 'https://api.allstak.sa';
 export const SDK_NAME = 'allstak-react';
-export const SDK_VERSION = '0.3.3';
+export const SDK_VERSION = '0.3.6';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
