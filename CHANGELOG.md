@@ -5,7 +5,12 @@ All notable changes to `@allstak/react` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.7] — 2026-05-18
+## [0.3.8] — 2026-05-18
+
+Reissue of 0.3.7 (publish failed at sigstore transparency log step,
+tarball never reached the registry). No code differences from 0.3.7.
+
+## [0.3.7] — 2026-05-18 (unpublished)
 
 ### Fixed
 - `SDK_VERSION` constant is now injected at build time from `package.json`

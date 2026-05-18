@@ -36,7 +36,7 @@ export const SDK_NAME = 'allstak-react';
 // Keep this in sync with package.json on every version bump.
 declare const __ALLSTAK_REACT_VERSION__: string;
 export const SDK_VERSION: string =
-  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.7';
+  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.8';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
