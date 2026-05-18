@@ -13,6 +13,17 @@ export interface AllStakProviderProps {
   debug?: boolean;
   enableHttpTracking?: boolean;
   httpTracking?: AllStakConfig['httpTracking'];
+  captureScreenshotOnError?: AllStakConfig['captureScreenshotOnError'];
+  screenshotRedaction?: AllStakConfig['screenshotRedaction'];
+  screenshotMaxBytes?: AllStakConfig['screenshotMaxBytes'];
+  screenshotUploadTimeoutMs?: AllStakConfig['screenshotUploadTimeoutMs'];
+  screenshotSampleRate?: AllStakConfig['screenshotSampleRate'];
+  screenshotOnUnhandledOnly?: AllStakConfig['screenshotOnUnhandledOnly'];
+  screenshotMaskStyle?: AllStakConfig['screenshotMaskStyle'];
+  maskSelectors?: AllStakConfig['maskSelectors'];
+  ignoreSelectors?: AllStakConfig['ignoreSelectors'];
+  allowSelectors?: AllStakConfig['allowSelectors'];
+  beforeScreenshotUpload?: AllStakConfig['beforeScreenshotUpload'];
   /**
    * Per-console-method capture flags. Defaults: warn + error captured,
    * log + info NOT captured (to avoid breadcrumb spam from typical app
@@ -123,6 +134,17 @@ export function AllStakProvider({
   debug,
   enableHttpTracking,
   httpTracking,
+  captureScreenshotOnError,
+  screenshotRedaction,
+  screenshotMaxBytes,
+  screenshotUploadTimeoutMs,
+  screenshotSampleRate,
+  screenshotOnUnhandledOnly,
+  screenshotMaskStyle,
+  maskSelectors,
+  ignoreSelectors,
+  allowSelectors,
+  beforeScreenshotUpload,
   captureConsole,
   sampleRate,
   beforeSend,
@@ -161,6 +183,17 @@ export function AllStakProvider({
         tags,
         enableHttpTracking,
         httpTracking,
+        captureScreenshotOnError,
+        screenshotRedaction,
+        screenshotMaxBytes,
+        screenshotUploadTimeoutMs,
+        screenshotSampleRate,
+        screenshotOnUnhandledOnly,
+        screenshotMaskStyle,
+        maskSelectors,
+        ignoreSelectors,
+        allowSelectors,
+        beforeScreenshotUpload,
         captureConsole,
         sampleRate,
         beforeSend,

@@ -21,10 +21,22 @@ import type { HttpTrackingOptions } from './http-redact';
 import { installHttpInstrumentation } from './http-instrumentation';
 import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
 import { startWebVitals, WebVitalsHandle } from './web-vitals';
+import {
+  blobToBase64,
+  capturePrivacySafeScreenshot,
+  type ScreenshotCapture,
+  type ScreenshotRedactionMode,
+} from './screenshot';
 
 export const INGEST_HOST = 'https://api.allstak.sa';
 export const SDK_NAME = 'allstak-react';
-export const SDK_VERSION = '0.3.2';
+// SDK_VERSION is replaced at build time by tsup `define` (see tsup.config.ts)
+// using the version from package.json. The fallback string below is only used
+// when the source is imported directly (tests, ts-node) without that build step.
+// Keep this in sync with package.json on every version bump.
+declare const __ALLSTAK_REACT_VERSION__: string;
+export const SDK_VERSION: string =
+  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.7';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
@@ -106,6 +118,38 @@ export interface AllStakConfig {
    */
   httpTracking?: HttpTrackingOptions;
   /**
+   * Capture a privacy-redacted screenshot when an exception is captured.
+   * Off by default. Requires `html2canvas` to be installed by the wizard
+   * or app. Capture/upload is async and fail-open.
+   */
+  captureScreenshotOnError?: boolean;
+  /** Redaction policy for screenshots. Default: strict. */
+  screenshotRedaction?: ScreenshotRedactionMode;
+  /** Maximum encoded screenshot size in bytes. Default: 500 KB. */
+  screenshotMaxBytes?: number;
+  /** Screenshot upload timeout in milliseconds. Default: transport timeout. */
+  screenshotUploadTimeoutMs?: number;
+  /** Probability in [0, 1] that a captured error includes a screenshot. Default: 1. */
+  screenshotSampleRate?: number;
+  /** Only capture screenshots for unhandled/browser or ErrorBoundary events. Default: false. */
+  screenshotOnUnhandledOnly?: boolean;
+  /** Screenshot mask rendering style. Default: solid. */
+  screenshotMaskStyle?: 'solid' | 'blur';
+  /** Additional CSS selectors to mask before screenshot rendering. */
+  maskSelectors?: string[];
+  /** Additional CSS selectors to exclude from screenshot rendering. */
+  ignoreSelectors?: string[];
+  /** CSS selectors allowed only in custom redaction mode. Sensitive fields are still masked. */
+  allowSelectors?: string[];
+  /**
+   * Last-chance hook before screenshot upload. Return false/null to drop
+   * the screenshot. Never put secrets in metadata returned from this hook.
+   */
+  beforeScreenshotUpload?: (
+    screenshot: ScreenshotCapture,
+    event: ErrorIngestPayload,
+  ) => ScreenshotCapture | false | null | undefined | Promise<ScreenshotCapture | false | null | undefined>;
+  /**
    * Probability in [0, 1] that any given error is sent. Default: 1 (no sampling).
    * Applied per event before {@link beforeSend}.
    */
@@ -147,6 +191,7 @@ interface PayloadFrame {
 }
 
 export interface ErrorIngestPayload {
+  eventId?: string;
   exceptionClass: string;
   message: string;
   stackTrace?: string[];
@@ -335,6 +380,7 @@ export class AllStakClient {
     }
 
     const payload: ErrorIngestPayload = {
+      eventId: generateId(),
       exceptionClass,
       message: error.message,
       stackTrace,
@@ -353,7 +399,7 @@ export class AllStakClient {
       requestContext: browserRequestContext(),
       fingerprint: eff.fingerprint,
     };
-    this.sendThroughBeforeSend(payload);
+    void this.sendErrorThroughBeforeSend(payload);
   }
 
   /** Start a new span — auto-parented to any currently-active span. */
@@ -382,6 +428,7 @@ export class AllStakClient {
       if (!this.passesSampleRate()) return;
       const eff = this.effective();
       const payload: ErrorIngestPayload = {
+        eventId: generateId(),
         exceptionClass: 'Message',
         message,
         platform: this.config.platform,
@@ -585,13 +632,73 @@ export class AllStakClient {
   }
 
   private async sendThroughBeforeSend(payload: ErrorIngestPayload): Promise<void> {
+    const final = await this.applyBeforeSend(payload);
+    if (!final) return;
+    this.transport.send(ERRORS_PATH, final);
+  }
+
+  private async sendErrorThroughBeforeSend(payload: ErrorIngestPayload): Promise<void> {
+    const final = await this.applyBeforeSend(payload);
+    if (!final) return;
+    this.transport.send(ERRORS_PATH, final);
+    if (this.shouldCaptureScreenshot(final)) {
+      void this.captureAndUploadScreenshot(final).catch(() => undefined);
+    }
+  }
+
+  private async applyBeforeSend(payload: ErrorIngestPayload): Promise<ErrorIngestPayload | null | undefined> {
     let final: ErrorIngestPayload | null | undefined = payload;
     if (this.config.beforeSend) {
       try { final = await this.config.beforeSend(payload); }
       catch { final = payload; /* never let a buggy hook drop telemetry */ }
     }
-    if (!final) return; // explicit drop
-    this.transport.send(ERRORS_PATH, final);
+    return final;
+  }
+
+  private async captureAndUploadScreenshot(event: ErrorIngestPayload): Promise<void> {
+    if (!event.eventId) return;
+    const captured = await capturePrivacySafeScreenshot({
+      redactionMode: this.config.screenshotRedaction ?? 'strict',
+      maskStyle: this.config.screenshotMaskStyle ?? 'solid',
+      maskSelectors: this.config.maskSelectors,
+      ignoreSelectors: this.config.ignoreSelectors,
+      allowSelectors: this.config.allowSelectors,
+      maxBytes: this.config.screenshotMaxBytes,
+    });
+    if (!captured) return;
+    let final: ScreenshotCapture | false | null | undefined = captured;
+    if (this.config.beforeScreenshotUpload) {
+      try { final = await this.config.beforeScreenshotUpload(captured, event); }
+      catch { final = false; }
+    }
+    if (!final) return;
+    const dataBase64 = await blobToBase64(final.blob);
+    this.transport.uploadAttachment(event.eventId, {
+      contentType: final.contentType,
+      dataBase64,
+      width: final.width,
+      height: final.height,
+      redactionMode: final.redactionMode,
+      captureMethod: final.captureMethod,
+      sizeBytes: final.sizeBytes,
+      metadata: final.metadata,
+    }, { timeoutMs: this.config.screenshotUploadTimeoutMs });
+  }
+
+  private shouldCaptureScreenshot(event: ErrorIngestPayload): boolean {
+    if (this.config.captureScreenshotOnError !== true) return false;
+    const screenshotRate = this.config.screenshotSampleRate;
+    if (typeof screenshotRate === 'number') {
+      if (screenshotRate <= 0) return false;
+      if (screenshotRate < 1 && Math.random() >= screenshotRate) return false;
+    }
+    if (this.config.screenshotOnUnhandledOnly === true) {
+      const source = event.metadata?.source;
+      return source === 'window.onerror' ||
+        source === 'window.unhandledrejection' ||
+        source === 'AllStakProvider.ErrorBoundary';
+    }
+    return true;
   }
 
   private releaseTags(): Record<string, unknown> {

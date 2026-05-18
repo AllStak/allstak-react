@@ -166,6 +166,40 @@ AllStak defaults to minimal data collection. HTTP tracking ships with aggressive
 
 Additional redaction rules can be configured via `httpTracking.redactHeaders` and `httpTracking.redactQueryParams`.
 
+## Privacy-safe error screenshots
+
+Screenshot capture is **off by default**. Enable it only after confirming it fits your privacy policy:
+
+```bash
+npx @allstak/wizard@latest init --integration react --enable-screenshots
+```
+
+The wizard installs `html2canvas`, writes explicit `VITE_ALLSTAK_CAPTURE_SCREENSHOTS=true` env vars, and patches `AllStakProvider`. Manual fallback (you must install `html2canvas` yourself — see below):
+
+```bash
+npm install html2canvas
+```
+
+```tsx
+<AllStakProvider
+  apiKey="ask_live_YOUR_KEY"
+  captureScreenshotOnError
+  screenshotRedaction="strict"
+/>
+```
+
+`html2canvas` is a peer dependency declared `optional`: the SDK loads it via dynamic `import()` only when screenshot capture is enabled, and silently degrades to "no screenshot" if it is missing. **If you enable `captureScreenshotOnError` you must `npm install html2canvas` in your host app**, otherwise no screenshot is captured and the error event still sends (fail-open).
+
+Before upload, the SDK masks `input`, `textarea`, `select`, `contenteditable`, `data-allstak-mask`, `data-sensitive`, and fields whose `type`, `name`, `id`, `autocomplete`, or `aria-label` looks like password, OTP, token, card, phone, email, or ID data. Use `data-allstak-ignore` to exclude a region entirely. `data-allstak-allow` is honored only in `custom` mode and never overrides fields classified as sensitive. Uploads are async, capped at 500 KB, and fail open: the error event still sends if capture fails.
+
+Additional controls:
+
+- `screenshotMaskStyle="solid" | "blur"` controls how masked regions render before capture.
+- `maskSelectors`, `ignoreSelectors`, and `allowSelectors` add app-specific CSS selector policy.
+- `screenshotSampleRate` samples screenshots independently from event sampling.
+- `screenshotOnUnhandledOnly` restricts screenshot capture to browser unhandled errors and ErrorBoundary errors.
+- `screenshotUploadTimeoutMs` caps attachment upload latency.
+
 ## Configuration
 
 | Option | Type | Default | Description |
@@ -183,6 +217,16 @@ Additional redaction rules can be configured via `httpTracking.redactHeaders` an
 | `autoBreadcrumbsConsole` | `boolean` | `true` | console.warn/error breadcrumbs |
 | `autoBreadcrumbsFetch` | `boolean` | `true` | Fetch/XHR breadcrumbs |
 | `autoBreadcrumbsNavigation` | `boolean` | `true` | Navigation breadcrumbs |
+| `captureScreenshotOnError` | `boolean` | `false` | Opt-in redacted screenshot attachment for exceptions |
+| `screenshotRedaction` | `'strict' \| 'balanced' \| 'custom'` | `'strict'` | Screenshot redaction mode |
+| `screenshotMaskStyle` | `'solid' \| 'blur'` | `'solid'` | How masked regions are rendered before capture |
+| `maskSelectors` | `string[]` | -- | Extra CSS selectors to mask |
+| `ignoreSelectors` | `string[]` | -- | Extra CSS selectors to exclude from screenshots |
+| `allowSelectors` | `string[]` | -- | Custom-mode allowlist; never overrides sensitive fields |
+| `screenshotSampleRate` | `number` | `1` | Independent screenshot sampling rate |
+| `screenshotOnUnhandledOnly` | `boolean` | `false` | Capture screenshots only for unhandled/ErrorBoundary errors |
+| `screenshotUploadTimeoutMs` | `number` | transport default | Attachment upload timeout |
+| `beforeScreenshotUpload` | `function` | -- | Last-chance hook to drop or adjust screenshot metadata |
 
 ## Source Maps
 
@@ -237,6 +281,26 @@ module.exports = withAllStak(
 ```
 
 To strip embedded source content from uploaded maps, set `stripSources: true`.
+
+## Troubleshooting
+
+Run `npx @allstak/wizard@latest doctor --integration react` first — it checks the most common failure modes automatically. If you still see issues:
+
+- **Events not appearing in the dashboard.** Confirm the API key is correct and active in [app.allstak.sa](https://app.allstak.sa). Open the browser devtools Network panel and look for `POST` requests to `https://api.allstak.sa/ingest/v1/...` — a non-2xx response (especially `401`/`403`) means the key, project, or environment header is wrong. Set `debug: true` on the provider to see SDK activity in the console. If requests never leave the browser, a content-security-policy or ad-blocker is likely stripping them; whitelist `api.allstak.sa` (or your self-hosted host).
+- **Source maps not resolving (stack traces stay minified).** The release in the dashboard must match the release the SDK reports. Set `ALLSTAK_RELEASE` and `release` on the provider to the same string. Confirm `ALLSTAK_UPLOAD_TOKEN` is set in the build environment — the Vite/Webpack/Next plugin logs `skipping upload — no token` and only injects debug IDs when it is missing. Confirm your bundler actually emits `.map` files (`build.sourcemap: true` for Vite, `devtool: 'source-map'` for Webpack). The plugin logs each uploaded bundle/map pair plus the debug ID on `npm run build`.
+- **Screenshots not capturing.** `captureScreenshotOnError` must be `true` (it is `false` by default). `html2canvas` must be installed in the host app — the SDK loads it dynamically and silently returns `null` if it is missing. The error event still sends in either case (fail-open). If a screenshot is captured but the dashboard shows nothing, check the dashboard's attachment audit log for upload failures (rate-limited, oversized, encryption-error).
+- **TypeScript types missing or wrong.** Use the package's named exports (`AllStakProvider`, `AllStakErrorBoundary`, `useAllStak`, `AllStak`, etc.). Make sure `"moduleResolution": "bundler"` (or `"node16"` / `"nodenext"`) is set in your `tsconfig.json` so the `exports` map resolves correctly. Subpath imports (`@allstak/react/vite`, `/webpack`, `/next`, `/sourcemaps`) ship dedicated `.d.ts` files.
+
+## Limitations
+
+- **Browser-only.** This SDK runs in the browser. It does not capture errors thrown during SSR (`getServerSideProps`, route handlers, server components). For server-side error capture in Next.js, also configure server-side error reporting in your Next.js error handlers or use a server-side AllStak SDK.
+- **Screenshots are DOM-only.** `html2canvas` renders from the DOM tree. It cannot capture: cross-origin iframes, tainted `<canvas>` content, WebGL surfaces, `<video>` frames, or native browser dialogs. Foreign-object/SVG rendering quirks apply.
+- **Screenshot size cap: 500 KB.** The SDK re-encodes to WebP at decreasing quality, then scales down, then falls back to PNG — always enforced before upload. Very-large viewports may end up heavily downscaled.
+- **Breadcrumb buffer: 50.** Older breadcrumbs are dropped when the limit is reached. Adjust via `maxBreadcrumbs` if needed.
+- **Event buffer: 100.** The transport layer keeps at most 100 in-flight events; the oldest is dropped when full.
+- **No Web Worker context.** `AllStak.init()` and the provider hook into `window`, `document`, and global `fetch`/`XMLHttpRequest`. Errors thrown inside a dedicated Web Worker must be forwarded manually (`worker.onerror` → `AllStak.captureException`).
+- **Web Vitals coverage follows the browser.** `INP`, `LCP`, etc. depend on `PerformanceObserver` support; older browsers report only what they support.
+- **HTTP request/response bodies are off by default.** Enable explicitly via `httpTracking.captureRequestBody` / `captureResponseBody`. Headers also off by default. See the Privacy section.
 
 ## Self-Hosted
 

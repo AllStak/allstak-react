@@ -16,10 +16,25 @@ const BACKOFF_MAX_MS = 30_000;
 interface Pending {
   path: string;
   payload: unknown;
+  dedupeKey?: string;
+  timeoutMs?: number;
+}
+
+export interface AttachmentUpload {
+  contentType: string;
+  dataBase64: string;
+  width?: number;
+  height?: number;
+  redactionMode: string;
+  captureMethod: string;
+  sizeBytes: number;
+  metadata?: Record<string, unknown>;
 }
 
 export class HttpTransport {
   private buffer: Pending[] = [];
+  private bufferedKeys = new Set<string>();
+  private inFlightKeys = new Set<string>();
   private flushing = false;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
@@ -34,7 +49,29 @@ export class HttpTransport {
     return Promise.resolve();
   }
 
+  uploadAttachment(eventId: string, attachment: AttachmentUpload, options: { timeoutMs?: number } = {}): Promise<void> {
+    const dedupeKey = `attachment:${eventId}:screenshot`;
+    this.enqueueOrDispatch({
+      path: `/ingest/v1/errors/${encodeURIComponent(eventId)}/attachments`,
+      dedupeKey,
+      timeoutMs: options.timeoutMs,
+      payload: {
+        kind: 'screenshot',
+        contentType: attachment.contentType,
+        dataBase64: attachment.dataBase64,
+        width: attachment.width,
+        height: attachment.height,
+        redactionMode: attachment.redactionMode,
+        captureMethod: attachment.captureMethod,
+        sizeBytes: attachment.sizeBytes,
+        metadata: attachment.metadata ?? {},
+      },
+    });
+    return Promise.resolve();
+  }
+
   private enqueueOrDispatch(item: Pending): void {
+    if (item.dedupeKey && (this.bufferedKeys.has(item.dedupeKey) || this.inFlightKeys.has(item.dedupeKey))) return;
     if (Date.now() < this.circuitOpenUntil) {
       this.push(item);
       return;
@@ -43,21 +80,24 @@ export class HttpTransport {
   }
 
   private async dispatch(item: Pending): Promise<void> {
+    if (item.dedupeKey) this.inFlightKeys.add(item.dedupeKey);
     try {
-      await this.doFetch(item.path, item.payload);
+      await this.doFetch(item.path, item.payload, item.timeoutMs);
       this.consecutiveFailures = 0;
       this.circuitOpenUntil = 0;
       this.scheduleFlush();
     } catch (err) {
       this.recordFailure(err);
       this.push(item);
+    } finally {
+      if (item.dedupeKey) this.inFlightKeys.delete(item.dedupeKey);
     }
   }
 
-  private async doFetch(path: string, payload: unknown): Promise<void> {
+  private async doFetch(path: string, payload: unknown, timeoutMs = REQUEST_TIMEOUT): Promise<void> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -75,8 +115,10 @@ export class HttpTransport {
   }
 
   private push(item: Pending): void {
+    if (item.dedupeKey && this.bufferedKeys.has(item.dedupeKey)) return;
     if (this.buffer.length >= MAX_BUFFER) this.buffer.shift();
     this.buffer.push(item);
+    if (item.dedupeKey) this.bufferedKeys.add(item.dedupeKey);
   }
 
   private scheduleFlush(): void {
@@ -93,13 +135,14 @@ export class HttpTransport {
     this.flushing = true;
     try {
       const items = this.buffer.splice(0, this.buffer.length);
+      this.bufferedKeys.clear();
       for (const item of items) {
         if (Date.now() < this.circuitOpenUntil) {
           this.push(item);
           continue;
         }
         try {
-          await this.doFetch(item.path, item.payload);
+          await this.doFetch(item.path, item.payload, item.timeoutMs);
           this.consecutiveFailures = 0;
           this.circuitOpenUntil = 0;
         } catch (err) {

@@ -34,11 +34,22 @@ test('captureException posts to /ingest/v1/errors with X-AllStak-Key', async () 
   assert.match(sent[0].url, /\/ingest\/v1\/errors$/);
   assert.equal(sent[0].init.headers['X-AllStak-Key'], 'ask_test_key');
   const body = JSON.parse(sent[0].init.body);
+  assert.match(body.eventId, /^[0-9a-f-]{36}$/);
   assert.equal(body.message, 'boom');
   assert.equal(body.platform, 'browser');
   assert.equal(body.sdkName, 'allstak-react');
   assert.equal(body.environment, 'test');
   assert.equal(body.release, 'web@1.0.0');
+});
+
+test('screenshot capture is opt-in and fail-open when browser capture is unavailable', async () => {
+  sent.length = 0;
+  AllStak.init({ apiKey: 'ask_test_key', captureScreenshotOnError: true });
+  AllStak.captureException(new Error('no-browser-screenshot'));
+  await new Promise((r) => setTimeout(r, 50));
+  const paths = sent.map((s) => new URL(s.url).pathname);
+  assert.equal(paths.filter((p) => p.includes('/attachments')).length, 0);
+  assert.equal(paths.filter((p) => p === '/ingest/v1/errors').length, 1);
 });
 
 test('breadcrumb is attached to next capture and cleared after', async () => {

@@ -1,10 +1,11 @@
 {
   "name": "@allstak/react",
-  "version": "0.3.2",
+  "version": "0.3.7",
   "description": "AllStak React SDK — standalone error tracking, breadcrumbs, ErrorBoundary, useAllStak hook, and withAllStakProfiler HOC. No @allstak/* runtime dependencies.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -59,17 +60,24 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap --platform browser --external react --external react-dom && tsup src/build/sourcemaps.ts src/build/vite.ts src/build/webpack.ts src/build/next.ts --format esm,cjs --dts --sourcemap --platform node --out-dir dist/build --external react --external react-dom",
+    "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "peerDependencies": {
+    "html2canvas": ">=1.4.1",
     "react": ">=16.8.0"
+  },
+  "peerDependenciesMeta": {
+    "html2canvas": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
     "@types/node": "^25.6.0",
     "@types/react": "^18.3.0",
+    "html2canvas": "^1.4.1",
     "jsdom": "^29.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.1",
