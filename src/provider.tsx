@@ -8,6 +8,7 @@ export interface AllStakProviderProps {
   environment?: string;
   release?: string;
   host?: string;
+  tunnel?: string;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   debug?: boolean;
@@ -129,6 +130,7 @@ export function AllStakProvider({
   environment,
   release,
   host,
+  tunnel,
   user,
   tags,
   debug,
@@ -179,6 +181,7 @@ export function AllStakProvider({
         environment,
         release,
         host,
+        tunnel,
         user,
         tags,
         enableHttpTracking,

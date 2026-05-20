@@ -5,6 +5,10 @@ All notable changes to `@allstak/react` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] — 2026-05-20
+
+- Added performance trace sampling metadata, propagation headers, web vitals spans, page-load spans, HTTP spans, long-task spans, and sampled profile chunks.
+
 ## [0.3.8] — 2026-05-18
 
 Reissue of 0.3.7 (publish failed at sigstore transparency log step,

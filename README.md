@@ -84,6 +84,64 @@ AllStak.captureException(new Error('hello from allstak-react'));
 
 Check [app.allstak.sa](https://app.allstak.sa) -- the error appears within seconds.
 
+## Sentry-style APIs
+
+AllStak keeps project identity as `apiKey` (`ask_live_...`) instead of `dsn`, while matching the common Sentry React setup patterns.
+
+```tsx
+import * as AllStak from '@allstak/react';
+
+AllStak.init({
+  apiKey: 'ask_live_YOUR_KEY',
+  environment: 'production',
+});
+```
+
+### React 19 root error hooks
+
+```tsx
+import { createRoot } from 'react-dom/client';
+import { reactErrorHandler } from '@allstak/react';
+
+const root = createRoot(document.getElementById('root')!, {
+  onUncaughtError: reactErrorHandler(),
+  onCaughtError: reactErrorHandler(),
+  onRecoverableError: reactErrorHandler(),
+});
+
+root.render(<App />);
+```
+
+### Structured logs
+
+```tsx
+import { AllStak } from '@allstak/react';
+
+AllStak.logger.info('User action', { userId: '123' });
+AllStak.logger.warn('Slow response', { duration: 5000 });
+AllStak.logger.error('Operation failed', { reason: 'timeout' });
+```
+
+### Spans
+
+```tsx
+AllStak.startSpan({ op: 'test', name: 'Example Frontend Span' }, () => {
+  // work to measure
+});
+```
+
+### Tunneling
+
+Route telemetry through your own server to avoid browser extensions or network policy blocking direct ingest calls:
+
+```tsx
+<AllStakProvider apiKey="ask_live_YOUR_KEY" tunnel="/allstak-tunnel">
+  <AppRoot />
+</AllStakProvider>
+```
+
+Your tunnel receives the original target path in `X-AllStak-Target-Path` and the body as `{ path, payload }`. Forward `payload` to `https://api.allstak.sa${path}` with the same `X-AllStak-Key`.
+
 ## Error Boundary
 
 `AllStakProvider` wraps your app in an error boundary automatically. For fine-grained control, use `AllStakErrorBoundary` directly:
@@ -208,6 +266,7 @@ Additional controls:
 | `environment` | `string` | -- | Deployment environment |
 | `release` | `string` | -- | Version or git SHA |
 | `host` | `string` | `https://api.allstak.sa` | Ingest endpoint |
+| `tunnel` | `string` | -- | Browser-side tunnel endpoint; preserves `apiKey` and sends `{ path, payload }` |
 | `user` | `{ id?, email? }` | -- | Default user context |
 | `tags` | `Record<string, string>` | -- | Default tags |
 | `debug` | `boolean` | `false` | Log SDK activity to console |

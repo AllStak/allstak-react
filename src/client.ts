@@ -13,7 +13,7 @@ import { parseStack } from './stack';
 import { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
 import { instrumentBrowserNavigation, __setDefaultBreadcrumbForwarder } from './navigation';
 import { Scope, mergeScopes } from './scope';
-import { TracingModule, Span } from './tracing';
+import { TracingModule, Span, type SpanData, type SpanOptions } from './tracing';
 import { ReplayRecorder, ReplayOptions } from './replay';
 import { resolveDebugId } from './debug-id';
 import { HttpRequestModule } from './http-requests';
@@ -36,14 +36,15 @@ export const SDK_NAME = 'allstak-react';
 // Keep this in sync with package.json on every version bump.
 declare const __ALLSTAK_REACT_VERSION__: string;
 export const SDK_VERSION: string =
-  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.8';
+  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.9';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
-export type { SpanData } from './tracing';
+export type { SpanData, SpanOptions } from './tracing';
 
 const ERRORS_PATH = '/ingest/v1/errors';
 const LOGS_PATH = '/ingest/v1/logs';
+const PROFILES_PATH = '/ingest/v1/profiles';
 
 const VALID_BREADCRUMB_TYPES = new Set(['http', 'log', 'ui', 'navigation', 'query', 'default']);
 const VALID_BREADCRUMB_LEVELS = new Set(['info', 'warn', 'error', 'debug']);
@@ -54,6 +55,11 @@ export interface AllStakConfig {
   apiKey: string;
   /** Optional ingest host override; defaults to {@link INGEST_HOST}. */
   host?: string;
+  /**
+   * Optional browser-side tunnel endpoint. Keeps the public API compatible
+   * with Sentry-style tunneling while preserving AllStak's `apiKey` identity.
+   */
+  tunnel?: string;
   environment?: string;
   release?: string;
   user?: { id?: string; email?: string };
@@ -74,6 +80,16 @@ export interface AllStakConfig {
   fingerprint?: string[];
   /** Probability in [0, 1] that any new span is recorded. Default 1. */
   tracesSampleRate?: number;
+  /** Master switch for Sentry-style performance spans. Default: true. */
+  enablePerformance?: boolean;
+  /** Mutate or drop a performance span before it leaves the SDK. */
+  beforeSendSpan?: (span: SpanData) => SpanData | null | undefined;
+  /** URLs that should receive distributed tracing headers. Defaults to all non-AllStak HTTP calls. */
+  tracePropagationTargets?: (string | RegExp)[];
+  /** Alias for autoWebVitals. Default: true. */
+  enableWebVitals?: boolean;
+  /** Browser profile/long-task sampling rate. Default follows tracesSampleRate. */
+  profilesSampleRate?: number;
   /** Service name attached to every span (defaults to release if unset). */
   service?: string;
   maxBreadcrumbs?: number;
@@ -211,6 +227,20 @@ export interface ErrorIngestPayload {
   fingerprint?: string[];
 }
 
+type SeverityLevel = 'fatal' | 'error' | 'warning' | 'info' | 'debug';
+type LogLevel = 'fatal' | 'error' | 'warn' | 'warning' | 'info' | 'debug' | 'log';
+type SpanContextInput = string | {
+  op?: string;
+  operation?: string;
+  name?: string;
+  description?: string;
+  tags?: Record<string, string>;
+  attributes?: Record<string, string | number | boolean>;
+  measurements?: Record<string, number>;
+  platform?: string;
+  startTimeMillis?: number;
+};
+
 function frameToString(f: PayloadFrame): string {
   const fn = f.function && f.function.length > 0 ? f.function : '<anonymous>';
   const file = f.filename || f.absPath || '<anonymous>';
@@ -247,6 +277,7 @@ export class AllStakClient {
   private onErrorHandler: ((ev: ErrorEvent) => void) | null = null;
   private onRejectionHandler: ((ev: PromiseRejectionEvent) => void) | null = null;
   private webVitals: WebVitalsHandle | null = null;
+  private profileTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: AllStakConfig) {
     if (!config.apiKey) throw new Error('AllStak: config.apiKey is required');
@@ -258,12 +289,23 @@ export class AllStakClient {
     this.sessionId = generateId();
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
-    this.transport = new HttpTransport(baseUrl, config.apiKey);
+    this.transport = new HttpTransport(baseUrl, config.apiKey, { tunnel: config.tunnel });
     this.tracing = new TracingModule(this.transport, {
       service: config.service ?? config.release ?? '',
       environment: this.config.environment ?? 'production',
+      release: this.config.release,
+      sessionId: this.sessionId,
+      platform: this.config.platform,
       tracesSampleRate: config.tracesSampleRate,
+      beforeSendSpan: config.beforeSendSpan,
     });
+    const autoPerformanceEnabled = this.config.enablePerformance === true ||
+      (this.config.enablePerformance !== false && typeof this.config.tracesSampleRate === 'number');
+    if (autoPerformanceEnabled) {
+      this.capturePageLoadSpan();
+      this.installLongTaskProfiler();
+      this.installSampledStackProfiler();
+    }
 
     if (config.autoCaptureBrowserErrors !== false && typeof window !== 'undefined') {
       this.installBrowserHandlers();
@@ -283,9 +325,24 @@ export class AllStakClient {
       try { instrumentBrowserNavigation(safeAddBreadcrumb); }
       catch { /* ignore */ }
     }
-    if (config.autoWebVitals !== false) {
+    if (config.autoWebVitals !== false && config.enableWebVitals !== false && autoPerformanceEnabled) {
       try {
         const send = (m: { name: string; value: number; id?: string }) => {
+          const metricName = m.name.toLowerCase();
+          const span = this.tracing.startSpan(`web.vital.${metricName}`, {
+            op: 'web.vital',
+            platform: 'web',
+            description: m.name,
+            measurements: { [metricName]: m.value },
+            attributes: {
+              metric: m.name,
+              route: typeof location !== 'undefined' ? location.pathname || '/' : '/',
+              session_id: this.sessionId,
+              ...(m.id ? { metric_id: m.id } : {}),
+            },
+            tags: { metric: m.name },
+          });
+          span.finish('ok');
           this.transport.send(LOGS_PATH, {
             timestamp: new Date().toISOString(),
             level: 'info',
@@ -329,6 +386,15 @@ export class AllStakClient {
           this.httpRequests,
           config.httpTracking ?? {},
           baseUrl,
+          {
+            tracing: this.tracing,
+            release: this.config.release,
+            dist: this.config.dist,
+            platform: this.config.platform,
+            environment: this.config.environment,
+            sessionId: this.sessionId,
+            tracePropagationTargets: config.tracePropagationTargets,
+          },
         );
         this._instrumentAxios = instrumentAxios;
       } catch { /* never break init */ }
@@ -403,8 +469,43 @@ export class AllStakClient {
   }
 
   /** Start a new span — auto-parented to any currently-active span. */
-  startSpan(operation: string, options?: { description?: string; tags?: Record<string, string> }): Span {
-    return this.tracing.startSpan(operation, options);
+  startSpan(operation: SpanContextInput, options?: SpanOptions): Span;
+  startSpan<T>(
+    operation: SpanContextInput,
+    callback: (span: Span) => T,
+  ): T;
+  startSpan<T>(
+    operation: SpanContextInput,
+    optionsOrCallback?: SpanOptions | ((span: Span) => T),
+  ): Span | T {
+    const normalized = normalizeSpanInput(
+      operation,
+      typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback,
+    );
+    const span = this.tracing.startSpan(normalized.operation, {
+      description: normalized.description,
+      tags: normalized.tags,
+      op: normalized.op,
+      platform: normalized.platform,
+      measurements: normalized.measurements,
+      attributes: normalized.attributes,
+      startTimeMillis: normalized.startTimeMillis,
+    });
+    if (typeof optionsOrCallback !== 'function') return span;
+    try {
+      const result = optionsOrCallback(span);
+      if (result && typeof (result as any).then === 'function') {
+        return (result as any).then(
+          (value: any) => { span.finish('ok'); return value; },
+          (error: any) => { span.finish('error'); throw error; },
+        );
+      }
+      span.finish('ok');
+      return result;
+    } catch (error) {
+      span.finish('error');
+      throw error;
+    }
   }
   /** Get (and lazily create) the active trace ID. */
   getTraceId(): string { return this.tracing.getTraceId(); }
@@ -417,7 +518,7 @@ export class AllStakClient {
 
   captureMessage(
     message: string,
-    level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
+    level: SeverityLevel = 'info',
     options: { as?: 'log' | 'error' | 'both' } = {},
   ): void {
     const as = options.as ?? (level === 'fatal' || level === 'error' ? 'both' : 'log');
@@ -446,6 +547,10 @@ export class AllStakClient {
       };
       this.sendThroughBeforeSend(payload);
     }
+  }
+
+  captureLog(level: LogLevel, message: string, attributes?: Record<string, unknown>): void {
+    this.sendLog(normalizeLogLevel(level), message, attributes);
   }
 
   addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void {
@@ -500,7 +605,7 @@ export class AllStakClient {
   }
 
   /** Set the default severity level applied to subsequent captures. */
-  setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void {
+  setLevel(level: SeverityLevel): void {
     this.config.level = level;
   }
 
@@ -531,6 +636,7 @@ export class AllStakClient {
     if (this.replay) { this.replay.destroy(); this.replay = null; }
     if (this.httpRequests) { this.httpRequests.destroy(); this.httpRequests = null; }
     if (this.webVitals) { this.webVitals.destroy(); this.webVitals = null; }
+    if (this.profileTimer) { clearInterval(this.profileTimer); this.profileTimer = null; }
     this._instrumentAxios = null;
     this.breadcrumbs = [];
   }
@@ -548,7 +654,7 @@ export class AllStakClient {
     window.addEventListener('unhandledrejection', this.onRejectionHandler as EventListener);
   }
 
-  private sendLog(level: string, message: string): void {
+  private sendLog(level: string, message: string, attributes?: Record<string, unknown>): void {
     this.transport.send(LOGS_PATH, {
       timestamp: new Date().toISOString(),
       level,
@@ -559,7 +665,7 @@ export class AllStakClient {
       platform: this.config.platform,
       sdkName: this.config.sdkName,
       sdkVersion: this.config.sdkVersion,
-      metadata: { ...this.releaseTags(), ...this.config.tags },
+      metadata: { ...this.releaseTags(), ...this.config.tags, ...(attributes ?? {}) },
     });
   }
 
@@ -711,6 +817,177 @@ export class AllStakClient {
     if (this.config.branch) out['commit.branch'] = this.config.branch;
     return out;
   }
+
+  private capturePageLoadSpan(): void {
+    if (typeof performance === 'undefined' || typeof window === 'undefined') return;
+    try {
+      const nav = performance.getEntriesByType?.('navigation')?.[0] as PerformanceNavigationTiming | undefined;
+      if (!nav) return;
+      const origin = performance.timeOrigin || Date.now();
+      const start = Math.round(origin + (nav?.startTime ?? 0));
+      const endOffset = nav?.loadEventEnd && nav.loadEventEnd > 0 ? nav.loadEventEnd : performance.now();
+      const end = Math.round(origin + endOffset);
+      const measurements: Record<string, number> = {};
+      if (nav) {
+        measurements.ttfb = Math.max(0, nav.responseStart - nav.requestStart);
+        measurements.dom_interactive_ms = Math.max(0, nav.domInteractive - nav.startTime);
+        measurements.load_event_ms = Math.max(0, nav.loadEventEnd - nav.startTime);
+      }
+      const span = this.tracing.startSpan('pageload', {
+        op: 'pageload',
+        platform: 'web',
+        description: window.location?.pathname || '/',
+        startTimeMillis: start,
+        measurements,
+        attributes: {
+          route: window.location?.pathname || '/',
+          url: window.location?.href?.split('?')[0] || '',
+          session_id: this.sessionId,
+        },
+      });
+      span.finish('ok', end);
+    } catch { /* never break init */ }
+  }
+
+  private installLongTaskProfiler(): void {
+    const rate = this.config.profilesSampleRate ?? this.config.tracesSampleRate ?? 0;
+    if (rate <= 0 || Math.random() >= rate) return;
+    if (typeof PerformanceObserver === 'undefined' || typeof performance === 'undefined') return;
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const duration = Number(entry.duration || 0);
+          if (!Number.isFinite(duration) || duration <= 0) continue;
+          const origin = performance.timeOrigin || Date.now();
+          const span = this.tracing.startSpan('profile.long_task', {
+            op: 'profile.long_task',
+            platform: 'web',
+            description: 'Long task',
+            startTimeMillis: Math.round(origin + entry.startTime),
+            measurements: { long_task_ms: duration },
+            attributes: {
+              route: typeof location !== 'undefined' ? location.pathname || '/' : '/',
+              session_id: this.sessionId,
+            },
+          });
+          span.finish('ok', Math.round(origin + entry.startTime + duration));
+        }
+      });
+      observer.observe({ type: 'longtask', buffered: true } as PerformanceObserverInit);
+    } catch { /* unsupported browser */ }
+  }
+
+  private installSampledStackProfiler(): void {
+    const rate = this.config.profilesSampleRate ?? 0;
+    if (rate <= 0 || Math.random() >= rate) return;
+    if (typeof window === 'undefined') return;
+
+    const startedAt = Date.now();
+    const profileId = generateId();
+    const intervalMs = 100;
+    const flushEveryMs = 10_000;
+    const samples: Array<{
+      elapsedMs: number;
+      thread: string;
+      stack: Array<{ function?: string; file?: string; line?: number; column?: number }>;
+    }> = [];
+
+    const flush = () => {
+      if (samples.length === 0) return;
+      const chunk = samples.splice(0, samples.length);
+      this.transport.send(PROFILES_PATH, {
+        profiles: [{
+          profileId,
+          traceId: this.tracing.getTraceId(),
+          spanId: this.tracing.getCurrentSpanId() ?? undefined,
+          sessionId: this.sessionId,
+          release: this.config.release,
+          environment: this.config.environment,
+          platform: this.config.platform ?? 'browser',
+          runtime: 'browser',
+          profileType: 'sampled_stack',
+          durationMs: Date.now() - startedAt,
+          sampleCount: chunk.length,
+          samples: chunk,
+          measurements: { sample_interval_ms: intervalMs },
+          attributes: {
+            route: typeof location !== 'undefined' ? location.pathname || '/' : '/',
+            sdk_name: this.config.sdkName ?? SDK_NAME,
+            sdk_version: this.config.sdkVersion ?? SDK_VERSION,
+          },
+          timestampMillis: Date.now(),
+        }],
+      });
+    };
+
+    this.profileTimer = setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      const stack = parseStack(new Error('AllStak profile sample').stack)
+        .slice(1, 65)
+        .map((f) => ({
+          function: f.function,
+          file: f.filename || f.absPath,
+          line: f.lineno,
+          column: f.colno,
+        }));
+      samples.push({ elapsedMs, thread: 'main', stack });
+      if (elapsedMs > 0 && elapsedMs % flushEveryMs < intervalMs) flush();
+    }, intervalMs);
+    (this.profileTimer as any)?.unref?.();
+
+    window.addEventListener('pagehide', flush, { once: false });
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flush();
+    });
+  }
+}
+
+function normalizeLogLevel(level: LogLevel): string {
+  if (level === 'warning') return 'warn';
+  if (level === 'log') return 'info';
+  return level;
+}
+
+function normalizeSpanInput(
+  input: SpanContextInput,
+  options?: SpanOptions,
+): {
+  operation: string;
+  op?: string;
+  platform?: string;
+  description?: string;
+  tags?: Record<string, string>;
+  measurements?: Record<string, number>;
+  attributes?: Record<string, string | number | boolean | null | undefined>;
+  startTimeMillis?: number;
+} {
+  if (typeof input === 'string') {
+    return {
+      operation: input,
+      op: options?.op,
+      platform: options?.platform,
+      description: options?.description,
+      tags: options?.tags,
+      measurements: options?.measurements,
+      attributes: options?.attributes,
+      startTimeMillis: options?.startTimeMillis,
+    };
+  }
+  const tags: Record<string, string> = { ...(input.tags ?? {}), ...(options?.tags ?? {}) };
+  const attributes = { ...(input.attributes ?? {}), ...(options?.attributes ?? {}) };
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value != null && tags[key] == null) tags[key] = String(value);
+  }
+  return {
+    operation: input.op ?? input.operation ?? input.name ?? 'custom',
+    op: options?.op ?? input.op,
+    platform: options?.platform ?? input.platform,
+    description: options?.description ?? input.description ?? input.name,
+    tags,
+    measurements: { ...(input.measurements ?? {}), ...(options?.measurements ?? {}) },
+    attributes,
+    startTimeMillis: options?.startTimeMillis ?? input.startTimeMillis,
+  };
 }
 
 let instance: AllStakClient | null = null;
@@ -749,10 +1026,30 @@ export const AllStak = {
   },
   captureMessage(
     message: string,
-    level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
+    level: SeverityLevel = 'info',
     options?: { as?: 'log' | 'error' | 'both' },
   ): void {
     ensureInit().captureMessage(message, level, options);
+  },
+  logger: {
+    debug(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('debug', message, attributes);
+    },
+    info(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('info', message, attributes);
+    },
+    log(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('log', message, attributes);
+    },
+    warn(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('warn', message, attributes);
+    },
+    error(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('error', message, attributes);
+    },
+    fatal(message: string, attributes?: Record<string, unknown>): void {
+      ensureInit().captureLog('fatal', message, attributes);
+    },
   },
   addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void {
     ensureInit().addBreadcrumb(type, message, level, data);
@@ -764,7 +1061,7 @@ export const AllStak = {
   setExtra(key: string, value: unknown): void { ensureInit().setExtra(key, value); },
   setExtras(extras: Record<string, unknown>): void { ensureInit().setExtras(extras); },
   setContext(name: string, ctx: Record<string, unknown> | null): void { ensureInit().setContext(name, ctx); },
-  setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void { ensureInit().setLevel(level); },
+  setLevel(level: SeverityLevel): void { ensureInit().setLevel(level); },
   setFingerprint(fingerprint: string[] | null): void { ensureInit().setFingerprint(fingerprint); },
   flush(timeoutMs?: number): Promise<boolean> { return ensureInit().flush(timeoutMs); },
   setIdentity(identity: { sdkName?: string; sdkVersion?: string; platform?: string; dist?: string }): void {
@@ -776,8 +1073,11 @@ export const AllStak = {
    * the callback. Pop is automatic (sync, async, throwing).
    */
   withScope<T>(callback: (scope: Scope) => T): T { return ensureInit().withScope(callback); },
-  startSpan(operation: string, options?: { description?: string; tags?: Record<string, string> }): Span {
-    return ensureInit().startSpan(operation, options);
+  startSpan<T = Span>(
+    operation: SpanContextInput,
+    optionsOrCallback?: SpanOptions | ((span: Span) => T),
+  ): Span | T {
+    return ensureInit().startSpan(operation as any, optionsOrCallback as any);
   },
   getTraceId(): string { return ensureInit().getTraceId(); },
   setTraceId(traceId: string): void { ensureInit().setTraceId(traceId); },

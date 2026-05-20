@@ -20,6 +20,15 @@ interface Pending {
   timeoutMs?: number;
 }
 
+export interface HttpTransportOptions {
+  /**
+   * Browser-side tunnel endpoint. When set, telemetry is posted to this URL
+   * instead of directly to the AllStak ingest host. The application server is
+   * expected to forward the JSON body to `X-AllStak-Target-Path`.
+   */
+  tunnel?: string;
+}
+
 export interface AttachmentUpload {
   contentType: string;
   dataBase64: string;
@@ -42,6 +51,7 @@ export class HttpTransport {
   constructor(
     private baseUrl: string,
     private apiKey: string,
+    private options: HttpTransportOptions = {},
   ) {}
 
   send(path: string, payload: unknown): Promise<void> {
@@ -95,7 +105,7 @@ export class HttpTransport {
   }
 
   private async doFetch(path: string, payload: unknown, timeoutMs = REQUEST_TIMEOUT): Promise<void> {
-    const url = `${this.baseUrl}${path}`;
+    const url = this.options.tunnel || `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -104,8 +114,9 @@ export class HttpTransport {
         headers: {
           'Content-Type': 'application/json',
           'X-AllStak-Key': this.apiKey,
+          ...(this.options.tunnel ? { 'X-AllStak-Target-Path': path } : {}),
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(this.options.tunnel ? { path, payload } : payload),
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

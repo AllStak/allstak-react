@@ -63,6 +63,69 @@ export type { HttpTrackingOptions } from './http-redact';
 export { HttpRequestModule } from './http-requests';
 export type { HttpRequestEvent } from './http-requests';
 
+// Sentry-style namespace import support:
+//
+//   import * as AllStak from '@allstak/react';
+//   AllStak.init({ apiKey: 'ask_live_...' });
+//
+// The `apiKey` name is intentional and remains the AllStak project identity.
+export const init = AllStak.init;
+export const captureException = AllStak.captureException;
+export const captureMessage = AllStak.captureMessage;
+export const logger = AllStak.logger;
+export const startSpan = AllStak.startSpan;
+export const addBreadcrumb = AllStak.addBreadcrumb;
+export const clearBreadcrumbs = AllStak.clearBreadcrumbs;
+export const setUser = AllStak.setUser;
+export const setTag = AllStak.setTag;
+export const setTags = AllStak.setTags;
+export const setExtra = AllStak.setExtra;
+export const setExtras = AllStak.setExtras;
+export const setContext = AllStak.setContext;
+export const setLevel = AllStak.setLevel;
+export const setFingerprint = AllStak.setFingerprint;
+export const flush = AllStak.flush;
+export const withScope = AllStak.withScope;
+export const getTraceId = AllStak.getTraceId;
+export const setTraceId = AllStak.setTraceId;
+export const getCurrentSpanId = AllStak.getCurrentSpanId;
+export const resetTrace = AllStak.resetTrace;
+export const instrumentAxios = AllStak.instrumentAxios;
+export const getSessionId = AllStak.getSessionId;
+export const getConfig = AllStak.getConfig;
+export const destroy = AllStak.destroy;
+
+export interface ReactRootErrorInfo {
+  componentStack?: string;
+  digest?: string;
+  [key: string]: unknown;
+}
+
+export type ReactRootErrorCallback = (error: unknown, errorInfo: ReactRootErrorInfo) => void;
+
+/**
+ * React 19 root error hook adapter, matching Sentry's setup shape:
+ *
+ *   createRoot(container, {
+ *     onUncaughtError: AllStak.reactErrorHandler(),
+ *     onCaughtError: AllStak.reactErrorHandler(),
+ *     onRecoverableError: AllStak.reactErrorHandler(),
+ *   });
+ */
+export function reactErrorHandler(callback?: ReactRootErrorCallback): ReactRootErrorCallback {
+  return (error: unknown, errorInfo: ReactRootErrorInfo = {}) => {
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    try {
+      AllStak.captureException(normalized, {
+        source: 'react.root.error-handler',
+        componentStack: errorInfo.componentStack ?? '',
+        ...(errorInfo.digest ? { digest: errorInfo.digest } : {}),
+      });
+    } catch { /* never break React's error flow */ }
+    try { callback?.(error, errorInfo); } catch { /* match fail-open SDK behavior */ }
+  };
+}
+
 // ── ErrorBoundary (legacy standalone — provider's boundary is preferred) ──
 
 export interface AllStakErrorBoundaryProps {
