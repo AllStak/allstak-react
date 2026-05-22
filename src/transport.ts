@@ -44,6 +44,7 @@ export class HttpTransport {
   private buffer: Pending[] = [];
   private bufferedKeys = new Set<string>();
   private inFlightKeys = new Set<string>();
+  private inFlight = new Set<Promise<void>>();
   private flushing = false;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
@@ -86,7 +87,12 @@ export class HttpTransport {
       this.push(item);
       return;
     }
-    void this.dispatch(item).catch(() => undefined);
+    this.track(this.dispatch(item));
+  }
+
+  private track(promise: Promise<void>): void {
+    this.inFlight.add(promise);
+    promise.finally(() => this.inFlight.delete(promise)).catch(() => undefined);
   }
 
   private async dispatch(item: Pending): Promise<void> {
@@ -180,19 +186,22 @@ export class HttpTransport {
   }
 
   /**
-   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   * Wait for queued and in-flight telemetry to drain. Resolves `true` if
+   * telemetry drains within `timeoutMs` (default 2000ms), `false` otherwise.
    * Useful at process exit / before navigation away.
    */
   async flush(timeoutMs = 2000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    await this.flushBuffer();
-    while (this.buffer.length > 0 || this.flushing) {
+    while (true) {
+      if (this.buffer.length > 0 && !this.flushing && Date.now() >= this.circuitOpenUntil) {
+        await this.flushBuffer();
+      }
+      if (this.buffer.length === 0 && this.inFlight.size === 0 && !this.flushing) {
+        return true;
+      }
       if (Date.now() >= deadline) return false;
       await new Promise((r) => setTimeout(r, 25));
-      await this.flushBuffer();
     }
-    return true;
   }
 }
 

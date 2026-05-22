@@ -96,6 +96,10 @@ test('1. fetch success — captures method/url/status/duration; body+headers OFF
   assert.equal(e.method, 'GET');
   assert.equal(e.url, 'https://api.example.com/users');
   assert.equal(e.statusCode, 200);
+  assert.match(e.traceId, /^[a-f0-9-]{32,36}$/);
+  assert.match(e.requestId, /^[a-f0-9]{32}$/);
+  assert.match(e.spanId, /^[a-f0-9]{16}$/);
+  assert.equal(e.parentSpanId, '');
   assert.ok(typeof e.durationMs === 'number');
   assert.equal(e.requestBody, undefined, 'body OFF by default');
   assert.equal(e.responseBody, undefined, 'body OFF by default');
@@ -269,6 +273,8 @@ test('9. axios manual instrumentation — interceptors capture request', async (
   assert.ok(e, 'axios event recorded');
   assert.equal(e.method, 'POST');
   assert.equal(e.statusCode, 200);
+  assert.match(e.requestId, /^[a-f0-9]{32}$/);
+  assert.match(e.spanId, /^[a-f0-9]{16}$/);
 });
 
 test('10. idempotent patching — second init does NOT double-fire', async () => {

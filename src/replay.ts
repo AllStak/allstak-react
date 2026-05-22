@@ -145,6 +145,9 @@ export class ReplayRecorder {
     document.addEventListener('input', this.inputListener, true);
 
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
+      this.flushTimer.unref();
+    }
 
     try { this.addBreadcrumb('default', 'Replay recording started', 'info', { sessionId: this.sessionId }); }
     catch { /* ignore */ }
@@ -171,7 +174,7 @@ export class ReplayRecorder {
     if (this.buffer.length >= this.opts.maxBufferedEvents) this.flush();
   }
 
-  private flush(): void {
+  flush(): void {
     if (this.buffer.length === 0) return;
     const events = this.buffer;
     this.buffer = [];

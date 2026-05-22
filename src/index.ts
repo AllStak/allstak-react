@@ -38,7 +38,7 @@ export type { AllStakProviderProps } from './provider';
 
 // ── Core client + manual setup ──────────────────────────────────
 export { AllStak } from './client';
-export type { AllStakConfig, Breadcrumb } from './client';
+export type { AllStakConfig, Breadcrumb, ErrorEventProcessor } from './client';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope } from './client';
 export { capturePrivacySafeScreenshot } from './screenshot';
 export type { ScreenshotCapture, ScreenshotCaptureOptions, ScreenshotRedactionMode } from './screenshot';
@@ -63,7 +63,7 @@ export type { HttpTrackingOptions } from './http-redact';
 export { HttpRequestModule } from './http-requests';
 export type { HttpRequestEvent } from './http-requests';
 
-// Sentry-style namespace import support:
+// namespace-compatible namespace import support:
 //
 //   import * as AllStak from '@allstak/react';
 //   AllStak.init({ apiKey: 'ask_live_...' });
@@ -81,11 +81,14 @@ export const setTag = AllStak.setTag;
 export const setTags = AllStak.setTags;
 export const setExtra = AllStak.setExtra;
 export const setExtras = AllStak.setExtras;
+export const addEventProcessor = AllStak.addEventProcessor;
 export const setContext = AllStak.setContext;
 export const setLevel = AllStak.setLevel;
 export const setFingerprint = AllStak.setFingerprint;
 export const flush = AllStak.flush;
 export const withScope = AllStak.withScope;
+export const getCurrentScope = AllStak.getCurrentScope;
+export const configureScope = AllStak.configureScope;
 export const getTraceId = AllStak.getTraceId;
 export const setTraceId = AllStak.setTraceId;
 export const getCurrentSpanId = AllStak.getCurrentSpanId;
@@ -104,7 +107,7 @@ export interface ReactRootErrorInfo {
 export type ReactRootErrorCallback = (error: unknown, errorInfo: ReactRootErrorInfo) => void;
 
 /**
- * React 19 root error hook adapter, matching Sentry's setup shape:
+ * React 19 root error hook adapter, matching familiar React error-hook setup shape:
  *
  *   createRoot(container, {
  *     onUncaughtError: AllStak.reactErrorHandler(),

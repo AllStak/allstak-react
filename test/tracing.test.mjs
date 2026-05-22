@@ -90,7 +90,7 @@ test('getTraceId is stable; setTraceId overrides; resetTrace clears', async () =
   assert.notEqual(t3, '00000000-0000-4000-8000-000000000000', 'resetTrace must drop the override');
 });
 
-test('captureException auto-attaches traceId and spanId to the error metadata', async () => {
+test('captureException auto-attaches traceId and spanId to the error payload', async () => {
   sent.length = 0;
   AllStak.init({ apiKey: 'k', release: 'r' });
   const span = AllStak.startSpan('checkout');
@@ -99,7 +99,8 @@ test('captureException auto-attaches traceId and spanId to the error metadata', 
   AllStak.destroy();
   await wait(30);
   const errorBody = JSON.parse(sent.find(errorPath).init.body);
-  assert.ok(errorBody.metadata.traceId, 'traceId must be on the error metadata');
+  assert.equal(errorBody.traceId, span.traceId);
+  assert.equal(errorBody.spanId, span.spanId);
   assert.equal(errorBody.metadata.traceId, span.traceId);
   assert.equal(errorBody.metadata.spanId, span.spanId);
 });

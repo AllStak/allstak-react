@@ -148,7 +148,12 @@ function normalizeSpanId(spanId: string): string {
 }
 
 function randomRequestId(): string {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const data = new Uint8Array(16);
+    crypto.getRandomValues(data);
+    return Array.from(data, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 }
 
 function targetMatches(url: string, targets?: (string | RegExp)[]): boolean {
@@ -261,6 +266,7 @@ export function patchFetch(): void {
       safeCapture({
         type: 'http_request',
         method, url: sanitizedUrl, statusCode: 0,
+        traceId: ctx?.traceId, requestId: ctx?.requestId, spanId: ctx?.spanId, parentSpanId: ctx?.parentSpanId,
         durationMs: Date.now() - start,
         requestBody: reqBody, requestHeaders: reqHeaders, requestSize: reqSize,
         error: String((err as any)?.message ?? err),
@@ -294,6 +300,7 @@ export function patchFetch(): void {
     safeCapture({
       type: 'http_request',
       method, url: sanitizedUrl,
+      traceId: ctx?.traceId, requestId: ctx?.requestId, spanId: ctx?.spanId, parentSpanId: ctx?.parentSpanId,
       statusCode: response.status, durationMs,
       requestBody: reqBody, requestHeaders: reqHeaders, requestSize: reqSize,
       responseBody: respBody, responseHeaders: respHeaders, responseSize: respSize,
@@ -384,6 +391,7 @@ export function patchXhr(): void {
       safeCapture({
         type: 'http_request',
         method, url: sanitizedUrl,
+        traceId: ctx?.traceId, requestId: ctx?.requestId, spanId: ctx?.spanId, parentSpanId: ctx?.parentSpanId,
         statusCode, durationMs,
         requestBody: reqBody, requestHeaders: reqHeaders, requestSize: reqSize,
         responseBody: respBody, responseHeaders: respHeaders, responseSize: respSize,
@@ -464,6 +472,10 @@ export function instrumentAxiosInstance(
         type: 'http_request',
         method: meta.method,
         url: sanitizedUrl,
+        traceId: meta.ctx?.traceId,
+        requestId: meta.ctx?.requestId,
+        spanId: meta.ctx?.spanId,
+        parentSpanId: meta.ctx?.parentSpanId,
         statusCode,
         durationMs: Date.now() - meta.start,
         requestBody: reqBody,

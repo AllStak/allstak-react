@@ -36,11 +36,17 @@ export interface HttpRequestEvent {
   responseHeaders?: Record<string, string>;
   error?: string;
   traceId?: string;
+  requestId?: string;
+  spanId?: string;
+  parentSpanId?: string;
 }
 
 export interface HttpRequestIngestItem {
   type: 'http_request';
   traceId: string;
+  requestId: string;
+  spanId?: string;
+  parentSpanId?: string;
   direction: 'outbound';
   method: string;
   // Backend wants host + path separately; we also keep the full sanitized
@@ -85,6 +91,11 @@ function genTraceId(): string {
   return `${seg(8)}-${seg(4)}-4${seg(3)}-${(8 + Math.floor(Math.random() * 4)).toString(16)}${seg(3)}-${seg(12)}`;
 }
 
+function genRequestId(): string {
+  const hex = (n: number) => Math.floor(Math.random() * n).toString(16);
+  return Array.from({ length: 32 }, () => hex(16)).join('');
+}
+
 function splitHostPath(url: string): { host: string; path: string } {
   try {
     const u = new URL(url);
@@ -114,6 +125,9 @@ export class HttpRequestModule {
     const item: HttpRequestIngestItem = {
       type: 'http_request',
       traceId: ev.traceId ?? genTraceId(),
+      requestId: ev.requestId ?? genRequestId(),
+      spanId: ev.spanId,
+      parentSpanId: ev.parentSpanId,
       direction: 'outbound',
       method: (ev.method || 'GET').toUpperCase(),
       host,
@@ -145,7 +159,12 @@ export class HttpRequestModule {
     }
 
     if (this.queue.length >= BATCH_SIZE_THRESHOLD) { this.flush(); return; }
-    if (!this.flushTimer) this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (!this.flushTimer) {
+      this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+      if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
+        this.flushTimer.unref();
+      }
+    }
   }
 
   /** Snapshot of the last failed requests for error-linking. Newest last. */
