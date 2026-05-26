@@ -79,7 +79,6 @@ export default defineConfig({
 | Prop | Description |
 | --- | --- |
 | `apiKey` | Project API key. |
-| `host` | Optional ingest host override for self-hosted AllStak. |
 | `environment` | Deployment environment. |
 | `release` | App version or commit SHA. |
 | `service` | Logical frontend service name. |
