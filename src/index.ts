@@ -63,6 +63,11 @@ export type { HttpTrackingOptions } from './http-redact';
 export { HttpRequestModule } from './http-requests';
 export type { HttpRequestEvent } from './http-requests';
 
+// ── Transport internals (test surface) ──────────────────────────
+// Exposed for unit-testing the Retry-After parser. Not part of the
+// public API contract.
+export { parseRetryAfter as __parseRetryAfterForTest } from './transport';
+
 // namespace-compatible namespace import support:
 //
 //   import * as AllStak from '@allstak/react';
