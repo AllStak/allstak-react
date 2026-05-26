@@ -40,6 +40,8 @@ export type { AllStakProviderProps } from './provider';
 export { AllStak } from './client';
 export type { AllStakConfig, Breadcrumb, ErrorEventProcessor } from './client';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope } from './client';
+export { parseGitRelease, resolveRelease, releaseFromEnv, isNodeRuntime, __resetGitReleaseCacheForTest } from './release-detect';
+export type { GitRunner } from './release-detect';
 export { capturePrivacySafeScreenshot } from './screenshot';
 export type { ScreenshotCapture, ScreenshotCaptureOptions, ScreenshotRedactionMode } from './screenshot';
 

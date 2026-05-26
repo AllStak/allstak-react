@@ -21,6 +21,7 @@ import type { HttpTrackingOptions } from './http-redact';
 import { installHttpInstrumentation } from './http-instrumentation';
 import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
 import { startWebVitals, WebVitalsHandle } from './web-vitals';
+import { resolveRelease } from './release-detect';
 import {
   blobToBase64,
   capturePrivacySafeScreenshot,
@@ -75,6 +76,17 @@ export interface AllStakConfig {
   tunnel?: string;
   environment?: string;
   release?: string;
+  /**
+   * Auto-detect `release` from env vars and a never-empty SDK-version fallback
+   * when it is not set explicitly. Default: `true`.
+   *
+   * NOTE: allstak-react is browser-only, so RUNTIME local-git detection is not
+   * possible here (no `child_process`) — the git step is a documented no-op.
+   * The practical effect is: explicit → env (ALLSTAK_RELEASE, VERCEL_GIT_*, …)
+   * → SDK version, so `release` is never empty. Set `false` to disable the
+   * git probe AND the version fallback (release may then be left empty).
+   */
+  autoDetectRelease?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -335,6 +347,13 @@ export class AllStakClient {
     if (!this.config.sdkName) this.config.sdkName = SDK_NAME;
     if (!this.config.sdkVersion) this.config.sdkVersion = SDK_VERSION;
     if (!this.config.platform) this.config.platform = 'browser';
+    // Resolve release: explicit → env vars → local git (browser no-op) →
+    // SDK-version fallback. Gated by autoDetectRelease (default true).
+    this.config.release = resolveRelease(
+      this.config.release,
+      this.config.sdkVersion ?? SDK_VERSION,
+      this.config.autoDetectRelease !== false,
+    );
     this.sessionId = generateId();
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
