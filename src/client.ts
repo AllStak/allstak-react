@@ -87,6 +87,11 @@ export interface AllStakConfig {
    * git probe AND the version fallback (release may then be left empty).
    */
   autoDetectRelease?: boolean;
+  /**
+   * Register the resolved release with AllStak at SDK init. Default: false in
+   * browser SDKs to avoid one registration request per visitor.
+   */
+  autoRegisterRelease?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -321,6 +326,18 @@ function browserRequestContext(): ErrorIngestPayload['requestContext'] {
   };
 }
 
+function registerRuntimeRelease(config: AllStakConfig, transport: HttpTransport): void {
+  if (config.autoRegisterRelease !== true || !config.release) return;
+  void transport.send('/ingest/v1/releases', {
+    version: config.release,
+    environment: config.environment,
+    commitSha: config.commitSha,
+    branch: config.branch,
+    author: null,
+    message: null,
+  });
+}
+
 export class AllStakClient {
   private transport: HttpTransport;
   private config: AllStakConfig;
@@ -358,6 +375,7 @@ export class AllStakClient {
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
     this.transport = new HttpTransport(baseUrl, config.apiKey, { tunnel: config.tunnel });
+    registerRuntimeRelease(this.config, this.transport);
     this.tracing = new TracingModule(this.transport, {
       service: config.service ?? config.release ?? '',
       environment: this.config.environment ?? 'production',
