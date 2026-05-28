@@ -101,6 +101,12 @@ The SDK redacts common sensitive headers, query params, and body fields. Use `be
 - Source maps missing: use the same `release` in the SDK and upload plugin.
 - Browser requests blocked: allow `https://api.allstak.sa` in your content security policy.
 
+## Contributing and Support
+
+- Report bugs with the GitHub bug report template: https://github.com/AllStak/allstak-react/issues/new/choose
+- Open pull requests using the checklist in [CONTRIBUTING.md](CONTRIBUTING.md).
+- Report security vulnerabilities privately through [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT
