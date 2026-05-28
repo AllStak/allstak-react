@@ -70,6 +70,13 @@ export type { HttpRequestEvent } from './http-requests';
 // public API contract.
 export { parseRetryAfter as __parseRetryAfterForTest } from './transport';
 
+// ── Offline / persistent event queue ────────────────────────────
+// `OfflineStore` is wired automatically by the client (default ON in the
+// browser). Exported so RN/host code can supply a custom backing storage
+// (`OfflineStorage`) via `offlineStorage`, and for unit tests.
+export { OfflineStore, defaultOfflineStorage } from './offline-store';
+export type { OfflineStorage, PersistedEvent, OfflineStoreOptions } from './offline-store';
+
 // ── Release-health session tracking (test surface) ──────────────
 // `SessionTracker` is wired automatically by the client; exported for
 // unit-testing the start/end payload shape + status transitions.

@@ -23,6 +23,7 @@ import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
 import { startWebVitals, WebVitalsHandle } from './web-vitals';
 import { resolveRelease } from './release-detect';
 import { SessionTracker } from './session';
+import { OfflineStore, type OfflineStorage } from './offline-store';
 import {
   blobToBase64,
   capturePrivacySafeScreenshot,
@@ -102,6 +103,24 @@ export interface AllStakConfig {
    * runtime. Set `false` to opt out.
    */
   enableAutoSessionTracking?: boolean;
+  /**
+   * Persist undelivered telemetry to `localStorage` so it survives a page
+   * reload / browser restart AND a network outage. On the next init the SDK
+   * drains the store and re-sends each (already PII-scrubbed) event through the
+   * normal retry/backoff/circuit-breaker. On tab close, buffered events are
+   * flushed via `navigator.sendBeacon`. Bounded (count/bytes/age, oldest
+   * dropped); session lifecycle calls are never persisted. Default `true`.
+   * Degrades silently to in-memory-only when no usable storage is available.
+   */
+  enableOfflineQueue?: boolean;
+  /**
+   * Custom backing storage for the offline queue (RN/test injection). Must
+   * expose synchronous `getItem`/`setItem`/`removeItem`. Defaults to the
+   * browser `localStorage`. Pass `null` to force the in-memory-only path.
+   */
+  offlineStorage?: OfflineStorage | null;
+  /** localStorage key for the offline queue. Default `allstak.offline.v1`. */
+  offlineQueueKey?: string;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -406,6 +425,7 @@ export class AllStakClient {
   private eventProcessors: ErrorEventProcessor[] = [];
   private lastEventKey: string | null = null;
   private sessionTracker: SessionTracker | null = null;
+  private offlineStore: OfflineStore | null = null;
   private onPageHideHandler: (() => void) | null = null;
   private onVisibilityHandler: (() => void) | null = null;
 
@@ -426,9 +446,23 @@ export class AllStakClient {
     this.sessionId = generateId();
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
-    this.transport = new HttpTransport(baseUrl, config.apiKey, { tunnel: config.tunnel });
+    // Offline/persistent queue: survive a reload/restart + network outage by
+    // persisting undelivered (already PII-scrubbed) telemetry. Default ON;
+    // degrades silently to in-memory-only when storage is unavailable.
+    this.offlineStore = this.createOfflineStore();
+    this.transport = new HttpTransport(baseUrl, config.apiKey, {
+      tunnel: config.tunnel,
+      ...(this.offlineStore ? { offlineStore: this.offlineStore } : {}),
+    });
+    // Replay anything persisted on a previous launch. Async + fail-open.
+    if (this.offlineStore) {
+      try { this.transport.drain(); } catch { /* never break init */ }
+    }
     registerRuntimeRelease(this.config, this.transport);
     this.startSession();
+    // Page/tab close hooks: end the session AND beacon-flush buffered telemetry
+    // so nothing is lost on unload. Installed whenever either feature is active.
+    this.installUnloadHooks();
     this.tracing = new TracingModule(this.transport, {
       service: config.service ?? config.release ?? '',
       environment: this.config.environment ?? 'production',
@@ -815,6 +849,7 @@ export class AllStakClient {
       if (this.onVisibilityHandler) window.removeEventListener('visibilitychange', this.onVisibilityHandler);
     }
     this.sessionTracker = null;
+    this.offlineStore = null;
     this.onPageHideHandler = null;
     this.onVisibilityHandler = null;
     this.onErrorHandler = null;
@@ -828,6 +863,26 @@ export class AllStakClient {
     this.breadcrumbs = [];
     this.eventProcessors = [];
     this.lastEventKey = null;
+  }
+
+  /**
+   * Build the offline/persistent queue store, or return `null` to keep the
+   * transport's in-memory-only behavior. Disabled when `enableOfflineQueue` is
+   * `false`. When no custom storage is supplied the store resolves the browser
+   * `localStorage` and silently no-ops if it is unavailable/unwritable. Never
+   * throws — a store-construction failure leaves the SDK in-memory-only.
+   */
+  private createOfflineStore(): OfflineStore | null {
+    if (this.config.enableOfflineQueue === false) return null;
+    try {
+      const store = new OfflineStore({
+        ...(this.config.offlineStorage !== undefined ? { storage: this.config.offlineStorage } : {}),
+        ...(this.config.offlineQueueKey ? { key: this.config.offlineQueueKey } : {}),
+      });
+      return store.isAvailable() ? store : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -853,26 +908,31 @@ export class AllStakClient {
         this.sessionId,
       );
       this.sessionTracker.start();
-      this.installSessionUnloadHooks();
     } catch {
       this.sessionTracker = null; // never break init
     }
   }
 
   /**
-   * End the session when the page is hidden/unloaded so a browser tab close
-   * counts as a graceful shutdown. `pagehide` is the reliable terminal signal;
-   * `visibilitychange → hidden` is the iOS-Safari fallback. Both are idempotent
-   * (the tracker's `end` is a no-op after the first call).
+   * Page/tab-close hooks. On `pagehide` (and the iOS-Safari `visibilitychange →
+   * hidden` fallback) we (1) end the release-health session so a tab close is a
+   * graceful shutdown, and (2) flush buffered telemetry via
+   * `navigator.sendBeacon` so in-flight events are not lost — anything that
+   * can't be beaconed is persisted to survive the next launch. Both actions are
+   * idempotent and fail-open. Installed whenever session tracking or the
+   * offline queue is active.
    */
-  private installSessionUnloadHooks(): void {
+  private installUnloadHooks(): void {
     if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
-    this.onPageHideHandler = () => { try { this.sessionTracker?.end(); } catch { /* ignore */ } };
+    if (!this.sessionTracker && !this.offlineStore) return;
+    const onHidden = () => {
+      try { this.sessionTracker?.end(); } catch { /* ignore */ }
+      try { this.transport.flushToBeacon(); } catch { /* ignore */ }
+    };
+    this.onPageHideHandler = onHidden;
     this.onVisibilityHandler = () => {
       try {
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-          this.sessionTracker?.end();
-        }
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') onHidden();
       } catch { /* ignore */ }
     };
     window.addEventListener('pagehide', this.onPageHideHandler);
