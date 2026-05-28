@@ -39,7 +39,7 @@ export type { AllStakProviderProps } from './provider';
 // ── Core client + manual setup ──────────────────────────────────
 export { AllStak } from './client';
 export type { AllStakConfig, Breadcrumb, ErrorEventProcessor } from './client';
-export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope } from './client';
+export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope, __setForceSessionTrackingForTest } from './client';
 export { parseGitRelease, resolveRelease, releaseFromEnv, isNodeRuntime, __resetGitReleaseCacheForTest } from './release-detect';
 export type { GitRunner } from './release-detect';
 export { capturePrivacySafeScreenshot } from './screenshot';
@@ -69,6 +69,12 @@ export type { HttpRequestEvent } from './http-requests';
 // Exposed for unit-testing the Retry-After parser. Not part of the
 // public API contract.
 export { parseRetryAfter as __parseRetryAfterForTest } from './transport';
+
+// ── Release-health session tracking (test surface) ──────────────
+// `SessionTracker` is wired automatically by the client; exported for
+// unit-testing the start/end payload shape + status transitions.
+export { SessionTracker } from './session';
+export type { SessionStatus, SessionContext } from './session';
 
 // namespace-compatible namespace import support:
 //

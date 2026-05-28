@@ -22,6 +22,7 @@ import { installHttpInstrumentation } from './http-instrumentation';
 import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
 import { startWebVitals, WebVitalsHandle } from './web-vitals';
 import { resolveRelease } from './release-detect';
+import { SessionTracker } from './session';
 import {
   blobToBase64,
   capturePrivacySafeScreenshot,
@@ -92,6 +93,15 @@ export interface AllStakConfig {
    * browser SDKs to avoid one registration request per visitor.
    */
   autoRegisterRelease?: boolean;
+  /**
+   * Sentry-style release-health "one session per app-launch". When enabled
+   * (default `true`), init opens a session (`/ingest/v1/sessions/start`),
+   * tracks an in-memory ok/errored/crashed status, and closes the session on
+   * graceful shutdown (`/ingest/v1/sessions/end`). Sessions are NEVER sampled
+   * and the whole lifecycle is fail-open. Auto-skipped under a unit-test
+   * runtime. Set `false` to opt out.
+   */
+  enableAutoSessionTracking?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -326,6 +336,45 @@ function browserRequestContext(): ErrorIngestPayload['requestContext'] {
   };
 }
 
+/**
+ * Heuristic "are we under a unit-test runner?" guard. Mirrors the Java SDK's
+ * `isLikelyTestRuntime` so unit tests don't open release-health sessions
+ * against the live `/ingest/v1/sessions/*` endpoints. Browser-only, so the
+ * signal is `process.env` (`NODE_ENV=test`, Jest/Vitest markers) plus Node's
+ * own `--test` runner flag. Returns false in real browsers (no `process`).
+ */
+/**
+ * Test seam: when set true, {@link isLikelyTestRuntime} returns false so the
+ * session-tracking wiring can be exercised under the unit-test runner. Mirrors
+ * the Java SDK's "visible for testing" override. Not part of the public API.
+ * @internal
+ */
+let __forceSessionTrackingForTest = false;
+/** @internal — flip the test-runtime guard for session-tracking tests. */
+export function __setForceSessionTrackingForTest(force: boolean): void {
+  __forceSessionTrackingForTest = force;
+}
+
+function isLikelyTestRuntime(): boolean {
+  if (__forceSessionTrackingForTest) return false;
+  try {
+    const proc = (globalThis as any).process;
+    if (!proc) return false;
+    const env = proc.env ?? {};
+    if (env.NODE_ENV === 'test') return true;
+    if (env.JEST_WORKER_ID !== undefined) return true;
+    if (env.VITEST !== undefined || env.VITEST_WORKER_ID !== undefined) return true;
+    // Node's built-in test runner sets this; also covers `node --test`.
+    if (Array.isArray(proc.execArgv) && proc.execArgv.some((a: string) => a === '--test' || a.startsWith('--test'))) {
+      return true;
+    }
+    if (proc.env?.NODE_TEST_CONTEXT !== undefined) return true;
+  } catch {
+    /* ignore — never break init */
+  }
+  return false;
+}
+
 function registerRuntimeRelease(config: AllStakConfig, transport: HttpTransport): void {
   if (config.autoRegisterRelease !== true || !config.release) return;
   void transport.send('/ingest/v1/releases', {
@@ -356,6 +405,9 @@ export class AllStakClient {
   private profileTimer: ReturnType<typeof setInterval> | null = null;
   private eventProcessors: ErrorEventProcessor[] = [];
   private lastEventKey: string | null = null;
+  private sessionTracker: SessionTracker | null = null;
+  private onPageHideHandler: (() => void) | null = null;
+  private onVisibilityHandler: (() => void) | null = null;
 
   constructor(config: AllStakConfig) {
     if (!config.apiKey) throw new Error('AllStak: config.apiKey is required');
@@ -376,6 +428,7 @@ export class AllStakClient {
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
     this.transport = new HttpTransport(baseUrl, config.apiKey, { tunnel: config.tunnel });
     registerRuntimeRelease(this.config, this.transport);
+    this.startSession();
     this.tracing = new TracingModule(this.transport, {
       service: config.service ?? config.release ?? '',
       environment: this.config.environment ?? 'production',
@@ -554,7 +607,35 @@ export class AllStakClient {
       requestContext: browserRequestContext(),
       fingerprint: eff.fingerprint,
     };
+    this.recordSessionStatusForEvent(payload, context);
     void this.sendErrorThroughBeforeSend(payload);
+  }
+
+  /**
+   * Escalate the release-health session for a captured exception. An UNHANDLED
+   * / fatal event (`level: 'fatal'`, or an auto-captured `window.onerror` /
+   * `unhandledrejection` / React error-boundary / root-error-handler source)
+   * crashes the session; any other captured exception marks it errored. No
+   * I/O — the terminal `/sessions/end` POST carries the final status. Mirrors
+   * the Java SessionTracker `recordCrash` / `recordError` semantics.
+   */
+  private recordSessionStatusForEvent(
+    payload: ErrorIngestPayload,
+    context?: Record<string, unknown>,
+  ): void {
+    const tracker = this.sessionTracker;
+    if (!tracker) return;
+    try {
+      const source = context?.source;
+      const isUnhandled =
+        payload.level === 'fatal' ||
+        source === 'window.onerror' ||
+        source === 'window.unhandledrejection' ||
+        source === 'react-error-boundary' ||
+        source === 'react.root.error-handler';
+      if (isUnhandled) tracker.recordCrash();
+      else tracker.recordError();
+    } catch { /* never break capture */ }
   }
 
   /** Start a new span — auto-parented to any currently-active span. */
@@ -723,10 +804,19 @@ export class AllStakClient {
   getConfig(): AllStakConfig { return this.config; }
 
   destroy(): void {
+    // Close the release-health session BEFORE tearing down the transport so
+    // the /sessions/end POST has a chance to land. Status is whatever the
+    // session accumulated during its life.
+    try { this.sessionTracker?.end(); } catch { /* never throw on shutdown */ }
     if (typeof window !== 'undefined') {
       if (this.onErrorHandler) window.removeEventListener('error', this.onErrorHandler as EventListener);
       if (this.onRejectionHandler) window.removeEventListener('unhandledrejection', this.onRejectionHandler as EventListener);
+      if (this.onPageHideHandler) window.removeEventListener('pagehide', this.onPageHideHandler);
+      if (this.onVisibilityHandler) window.removeEventListener('visibilitychange', this.onVisibilityHandler);
     }
+    this.sessionTracker = null;
+    this.onPageHideHandler = null;
+    this.onVisibilityHandler = null;
     this.onErrorHandler = null;
     this.onRejectionHandler = null;
     this.tracing.destroy();
@@ -738,6 +828,55 @@ export class AllStakClient {
     this.breadcrumbs = [];
     this.eventProcessors = [];
     this.lastEventKey = null;
+  }
+
+  /**
+   * Open the release-health session for this app-launch. Reuses the SDK's
+   * existing {@link sessionId} so it matches every error/event payload.
+   * Skipped when opted out (`enableAutoSessionTracking: false`) or under a
+   * unit-test runtime. Fully fail-open — never blocks or throws into init.
+   */
+  private startSession(): void {
+    if (this.config.enableAutoSessionTracking === false) return;
+    if (isLikelyTestRuntime()) return;
+    try {
+      this.sessionTracker = new SessionTracker(
+        this.transport,
+        {
+          release: this.config.release,
+          environment: this.config.environment,
+          getUserId: () => this.config.user?.id,
+          sdkName: this.config.sdkName,
+          sdkVersion: this.config.sdkVersion,
+          platform: this.config.platform,
+        },
+        this.sessionId,
+      );
+      this.sessionTracker.start();
+      this.installSessionUnloadHooks();
+    } catch {
+      this.sessionTracker = null; // never break init
+    }
+  }
+
+  /**
+   * End the session when the page is hidden/unloaded so a browser tab close
+   * counts as a graceful shutdown. `pagehide` is the reliable terminal signal;
+   * `visibilitychange → hidden` is the iOS-Safari fallback. Both are idempotent
+   * (the tracker's `end` is a no-op after the first call).
+   */
+  private installSessionUnloadHooks(): void {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    this.onPageHideHandler = () => { try { this.sessionTracker?.end(); } catch { /* ignore */ } };
+    this.onVisibilityHandler = () => {
+      try {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          this.sessionTracker?.end();
+        }
+      } catch { /* ignore */ }
+    };
+    window.addEventListener('pagehide', this.onPageHideHandler);
+    window.addEventListener('visibilitychange', this.onVisibilityHandler);
   }
 
   private installBrowserHandlers(): void {

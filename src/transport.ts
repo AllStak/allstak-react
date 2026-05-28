@@ -71,8 +71,8 @@ export class HttpTransport {
     private options: HttpTransportOptions = {},
   ) {}
 
-  send(path: string, payload: unknown): Promise<void> {
-    this.enqueueOrDispatch({ path, payload });
+  send(path: string, payload: unknown, options: { timeoutMs?: number } = {}): Promise<void> {
+    this.enqueueOrDispatch({ path, payload, timeoutMs: options.timeoutMs });
     return Promise.resolve();
   }
 
