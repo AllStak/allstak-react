@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scrubbing on top of the existing key-name redaction: credit-card numbers
   (13–19 digits, Luhn-validated to avoid corrupting order ids) and US SSNs are
   **always** redacted; email addresses and IP addresses are redacted unless the
-  new `sendDefaultPii` config flag is `true` (default `false` = Sentry parity).
+  new `sendDefaultPii` config flag is `true` (default `false` = ).
   Depth- and length-capped, compiled once, fail-open. `scrubString`,
   `scrubDeep`, `scrubEventValues`, `makeValueScrubberProcessor`,
   `ValueScrubOptions`, and `ScrubbablePayload` are exported.
