@@ -38,7 +38,8 @@ export type { AllStakProviderProps } from './provider';
 
 // ── Core client + manual setup ──────────────────────────────────
 export { AllStak } from './client';
-export type { AllStakConfig, Breadcrumb, ErrorEventProcessor } from './client';
+export type { AllStakConfig, Breadcrumb, ErrorEventProcessor, SdkDiagnostics } from './client';
+export type { TransportStats } from './transport';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope, __setForceSessionTrackingForTest } from './client';
 export { parseGitRelease, resolveRelease, releaseFromEnv, isNodeRuntime, __resetGitReleaseCacheForTest } from './release-detect';
 export type { GitRunner } from './release-detect';
@@ -67,7 +68,7 @@ export type { HttpRequestEvent } from './http-requests';
 
 // ── Value-pattern PII scrubbing ─────────────────────────────────
 // `sendDefaultPii` (AllStakConfig) toggles email/IP scrubbing (default
-// false = Sentry parity). CC (Luhn-valid) + SSN are always scrubbed. The
+// false). CC (Luhn-valid) + SSN are always scrubbed. The
 // scrubbers are exported for unit tests and advanced/custom processors.
 export {
   scrubString,

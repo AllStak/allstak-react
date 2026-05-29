@@ -33,6 +33,13 @@ const FETCH_FLAG = '__allstak_http_fetch_patched__';
 const XHR_FLAG = '__allstak_http_xhr_patched__';
 const AXIOS_FLAG = Symbol.for('allstak.http.axios.instrumented');
 
+// The auto-breadcrumb module (src/auto-breadcrumbs.ts) also wraps
+// `globalThis.fetch` with this flag. Both wrappers are installed at init, so
+// each carries the other's flag forward onto the new top-level function to
+// keep BOTH idempotent across a second `init()` (Fast Refresh / re-mount) —
+// otherwise the wrappers stack and double-fire.
+const BREADCRUMB_FETCH_FLAG = '__allstak_fetch_patched__';
+
 const DEFAULT_MAX_BODY = 4096;
 
 // Module-level "current binding" — wrappers route capture calls through
@@ -309,6 +316,11 @@ export function patchFetch(): void {
     return response;
   };
   (wrapped as any)[FETCH_FLAG] = true;
+  // Preserve the auto-breadcrumb wrapper's flag (if it wrapped first) so it is
+  // still visible on the new top-level fetch and never gets re-applied.
+  if ((original as any)[BREADCRUMB_FETCH_FLAG]) {
+    (wrapped as any)[BREADCRUMB_FETCH_FLAG] = true;
+  }
   g.fetch = wrapped;
 }
 

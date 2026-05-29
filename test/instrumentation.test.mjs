@@ -51,6 +51,18 @@ const {
   instrumentConsole,
 } = await import('../dist/index.mjs');
 
+// Distributed tracing is default-on, so `init` now also ships `http.client`
+// spans + `/http-requests` events when the app makes a fetch. Those batches
+// flush on their own timers and can interleave with the error POST in the
+// shared `sent` array — so select the error payload by its ingest path
+// instead of assuming it is `sent[0]`.
+const isErrorReq = (s) => /\/ingest\/v1\/errors$/.test(s.url);
+const errorBody = () => {
+  const req = [...sent].reverse().find(isErrorReq);
+  assert.ok(req, 'an /ingest/v1/errors request must have been sent');
+  return JSON.parse(req.init.body);
+};
+
 // ───────────────────────────────────────────────────────────────
 // setLevel + setFingerprint
 // ───────────────────────────────────────────────────────────────
@@ -61,7 +73,7 @@ test('setLevel changes payload.level', async () => {
   AllStak.setLevel('warning');
   AllStak.captureException(new Error('warn-me'));
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(JSON.parse(sent[0].init.body).level, 'warning');
+  assert.equal(errorBody().level, 'warning');
 });
 
 test('setFingerprint propagates; setFingerprint(null) clears it', async () => {
@@ -70,13 +82,13 @@ test('setFingerprint propagates; setFingerprint(null) clears it', async () => {
   AllStak.setFingerprint(['feat-a', 'v2']);
   AllStak.captureException(new Error('group-me'));
   await new Promise((r) => setTimeout(r, 50));
-  assert.deepEqual(JSON.parse(sent[0].init.body).fingerprint, ['feat-a', 'v2']);
+  assert.deepEqual(errorBody().fingerprint, ['feat-a', 'v2']);
 
   sent.length = 0;
   AllStak.setFingerprint(null);
   AllStak.captureException(new Error('cleared'));
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(JSON.parse(sent[0].init.body).fingerprint, undefined);
+  assert.equal(errorBody().fingerprint, undefined);
 });
 
 test('error.name override survives as exceptionClass', async () => {
@@ -86,7 +98,7 @@ test('error.name override survives as exceptionClass', async () => {
   err.name = 'CustomDomainError';
   AllStak.captureException(err);
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(JSON.parse(sent[0].init.body).exceptionClass, 'CustomDomainError');
+  assert.equal(errorBody().exceptionClass, 'CustomDomainError');
 });
 
 // ───────────────────────────────────────────────────────────────
@@ -108,7 +120,7 @@ test('init wraps fetch — successful request adds an http breadcrumb', async ()
 
   AllStak.captureException(new Error('after-fetch'));
   await new Promise((r) => setTimeout(r, 50));
-  const body = JSON.parse(sent[0].init.body);
+  const body = errorBody();
   const httpCrumb = body.breadcrumbs?.find((c) => c.type === 'http');
   assert.ok(httpCrumb, 'an http breadcrumb must be recorded');
   assert.match(httpCrumb.message, /^GET https:\/\/example\.com\/api\/data -> 200$/);
@@ -128,7 +140,7 @@ test('instrumentFetch records breadcrumb + rethrows on network failure', async (
 
   AllStak.captureException(new Error('after-failed-fetch'));
   await new Promise((r) => setTimeout(r, 50));
-  const body = JSON.parse(sent[0].init.body);
+  const body = errorBody();
   const failCrumb = body.breadcrumbs.find((c) => c.type === 'http' && /failed$/.test(c.message));
   assert.ok(failCrumb);
   assert.equal(failCrumb.level, 'error');
@@ -141,7 +153,7 @@ test('instrumentFetch is idempotent — second init does not double-wrap', async
   await fetch('https://example.com/once');
   AllStak.captureException(new Error('after'));
   await new Promise((r) => setTimeout(r, 50));
-  const body = JSON.parse(sent[0].init.body);
+  const body = errorBody();
   const httpCrumbs = body.breadcrumbs.filter((c) => c.type === 'http' && /example\.com/.test(c.message));
   assert.equal(httpCrumbs.length, 1, 'fetch wrap must not double-fire');
 });
@@ -176,7 +188,7 @@ test('instrumentConsole wraps warn/error + forwards to originals', async () => {
 
   AllStak.captureException(new Error('after-logs'));
   await new Promise((r) => setTimeout(r, 50));
-  const body = JSON.parse(sent[0].init.body);
+  const body = errorBody();
   const logCrumbs = body.breadcrumbs.filter((c) => c.type === 'log');
   assert.equal(logCrumbs.length, 2);
   assert.equal(logCrumbs[0].level, 'warn');
@@ -206,7 +218,7 @@ test('pushState / popstate emit navigation breadcrumbs', async () => {
 
   AllStak.captureException(new Error('after-nav'));
   await new Promise((r) => setTimeout(r, 50));
-  const body = JSON.parse(sent[0].init.body);
+  const body = errorBody();
   const navCrumbs = body.breadcrumbs.filter((c) => c.type === 'navigation');
   // At least the two pushState transitions + the popstate
   assert.ok(navCrumbs.length >= 2, `expected at least 2 nav breadcrumbs, got ${navCrumbs.length}`);

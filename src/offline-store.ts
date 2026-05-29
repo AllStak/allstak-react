@@ -1,7 +1,7 @@
 /**
  * Offline / persistent event queue for the browser SDK.
  *
- * Sentry-parity goal: buffered telemetry must survive a process/app restart
+ * Goal: buffered telemetry must survive a process/app restart
  * AND a network outage. When the transport cannot deliver an event (offline,
  * retries exhausted, circuit open at shutdown) it writes the *already
  * PII-scrubbed* payload here. On the next SDK init the transport drains the

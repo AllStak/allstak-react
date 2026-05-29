@@ -5,7 +5,45 @@ All notable changes to `@allstak/react` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]## [0.4.0] — 2026-05-29
+## [Unreleased]
+
+## [0.5.0] — 2026-05-30
+
+### Changed
+
+- **Distributed tracing is now default-on in the browser.** A bare
+  `<AllStakProvider apiKey="…" />` / `AllStak.init({ apiKey })` now auto-wraps
+  outbound `fetch` / `XMLHttpRequest` / `axios` to inject the W3C `traceparent`
+  header (plus AllStak trace baggage) on calls matching
+  `tracePropagationTargets` and emit a lightweight `http.client` span per
+  request — so client→server traces link up with **zero per-call code**.
+  Previously this only happened when `enableHttpTracking: true` (default
+  `false`) was set. Toggle the new `enableDistributedTracing` flag (default
+  `true`, also surfaced as an `AllStakProvider` prop) to opt out.
+
+  This default-on tracing path is privacy-safe: request/response **bodies and
+  headers are never captured** by it regardless of `httpTracking`, and
+  sensitive query params are still redacted. `enableHttpTracking: true`
+  continues to be the explicit opt-in for body/header capture and only unlocks
+  that capture — it no longer changes whether the wrappers are installed.
+- **Web Vitals + the pageload span are decoupled from `enablePerformance`.**
+  `autoWebVitals` defaults `true` but was previously a silent no-op unless
+  `tracesSampleRate` / `enablePerformance` was also set. Web Vitals
+  (CLS/LCP/INP/FCP/TTFB, shipped as a `web.vital` span) and the one-shot
+  `pageload` span are cheap + privacy-safe and now ship by default, governed
+  solely by `autoWebVitals` / `enableWebVitals` (vitals) and `enablePerformance`
+  (pageload span; `enablePerformance: false` opts out). The expensive samplers
+  (long-task observer, sampled-stack profiler) remain gated behind
+  `enablePerformance` / `tracesSampleRate` as before.
+
+### Fixed
+
+- The `fetch` auto-breadcrumb wrapper and the HTTP-tracking wrapper now carry
+  each other's idempotency flag forward, so a second `init()` (Fast Refresh,
+  provider re-mount) no longer stacks duplicate wrappers and double-fires
+  breadcrumbs / HTTP events.
+
+## [0.4.0] — 2026-05-29
 
 > Publish status: npm `latest` is still **0.3.8**. Versions **0.3.9** and
 > **0.3.10** were tagged but their publishes never reached the registry

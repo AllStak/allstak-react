@@ -160,6 +160,20 @@ test('scrubDeep walks nested objects/arrays and leaves non-strings intact', () =
   assert.equal(out.list[1], 999);
 });
 
+test('scrubDeep redacts sensitive keys and token-shaped array values', () => {
+  const out = scrubDeep({
+    Authorization: 'Bearer should_not_leak',
+    nested: { apiKey: 'secret', Cookie: 'sid=secret', ok: 'visible' },
+    list: ['Bearer should_not_leak', { jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature' }],
+  });
+  assert.equal(out.Authorization, '[REDACTED]');
+  assert.equal(out.nested.apiKey, '[REDACTED]');
+  assert.equal(out.nested.Cookie, '[REDACTED]');
+  assert.equal(out.nested.ok, 'visible');
+  assert.equal(out.list[0], '[REDACTED]');
+  assert.equal(out.list[1].jwt, '[REDACTED]');
+});
+
 test('fail-open: pathological / huge inputs never throw and are returned safely', () => {
   // Oversized string is skipped (returned unchanged) rather than scanned.
   const huge = 'x'.repeat(20000) + ' a@b.com';
@@ -216,7 +230,7 @@ test('wire: explicit setUser email is NOT scrubbed (intentional identification)'
 });
 
 test('wire: explicit setUser email survives even with sendDefaultPii=false default', async () => {
-  // Same assertion as Sentry: sendDefaultPii does NOT strip explicit user.
+  // sendDefaultPii does NOT strip an explicitly set user.
   sent.length = 0;
   AllStak.init({ apiKey: 'ask_test_key', release: 'web@1.0.0', sendDefaultPii: false });
   AllStak.setUser({ id: 'u-2', email: 'explicit@corp.io' });
@@ -242,6 +256,58 @@ test('wire: breadcrumb message + data are scrubbed', async () => {
   assert.equal(body.breadcrumbs[0].message, 'mailed receipt to [REDACTED]');
   assert.equal(body.breadcrumbs[0].data.ip, '[REDACTED]');
   assert.equal(body.breadcrumbs[0].data.card, '[REDACTED]');
+});
+
+test('wire: beforeSend cannot reintroduce credentials or private values', async () => {
+  const canary = 'should_not_leak';
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature';
+  const body = await captureError(new Error('hook-secret-test'), { order_id: 'ORD-77' }, {
+    beforeSend(event) {
+      event.metadata = {
+        ...event.metadata,
+        Authorization: `Bearer ${canary}`,
+        Cookie: `sid=${canary}`,
+        nested: {
+          password: canary,
+          apiKey: canary,
+          jwt,
+          values: [`Bearer ${canary}`, { secret: canary }],
+        },
+        card: '4111111111111111',
+      };
+      event.requestContext = {
+        ...event.requestContext,
+        headers: { 'Set-Cookie': `a=${canary}` },
+      };
+      event.user = { id: 'u-1', email: 'keep@example.com', password: canary };
+      event.breadcrumbs = [
+        ...(event.breadcrumbs ?? []),
+        { type: 'default', message: `Bearer ${canary}`, data: { token: canary } },
+      ];
+      event.fingerprint = [`Bearer ${canary}`];
+      return event;
+    },
+  });
+
+  const raw = JSON.stringify(body);
+  assert.ok(body, 'error event was sent');
+  assert.ok(!raw.includes(canary), 'canary secret leaked to the wire');
+  assert.ok(!raw.includes(jwt), 'JWT leaked to the wire');
+  assert.ok(!raw.includes('4111111111111111'), 'credit card leaked to the wire');
+  assert.equal(body.metadata.Authorization, '[REDACTED]');
+  assert.equal(body.metadata.Cookie, '[REDACTED]');
+  assert.equal(body.metadata.nested.password, '[REDACTED]');
+  assert.equal(body.metadata.nested.apiKey, '[REDACTED]');
+  assert.equal(body.metadata.nested.jwt, '[REDACTED]');
+  assert.equal(body.metadata.nested.values[0], '[REDACTED]');
+  assert.equal(body.metadata.nested.values[1].secret, '[REDACTED]');
+  assert.equal(body.metadata.card, '[REDACTED]');
+  assert.equal(body.requestContext.headers['Set-Cookie'], '[REDACTED]');
+  assert.equal(body.user.email, 'keep@example.com', 'explicit user identity survives');
+  assert.equal(body.user.password, '[REDACTED]');
+  assert.equal(body.breadcrumbs.at(-1).message, '[REDACTED]');
+  assert.equal(body.breadcrumbs.at(-1).data.token, '[REDACTED]');
+  assert.equal(body.fingerprint[0], '[REDACTED]');
 });
 
 test('wire: stack frame paths / release / sdk fields are NOT corrupted', async () => {
@@ -312,7 +378,9 @@ test('scrubEventValues: only allowlisted carriers are touched', () => {
     breadcrumbs: [{ message: 'card 4111111111111111', data: { ssn: '123-45-6789' } }],
     release: 'web@1.0.0',
     sessionId: 'sess-a@b.com-id', // not free text — must NOT be scrubbed
-    user: { id: 'u', email: 'keep@me.com' }, // explicit user — must NOT be scrubbed
+    user: { id: 'u', email: 'keep@me.com', password: 'secret' },
+    requestContext: { headers: { Authorization: 'Bearer secret' } },
+    fingerprint: ['Bearer secret'],
   };
   const out = scrubEventValues(event);
   assert.equal(out.message, '[REDACTED]');
@@ -322,7 +390,9 @@ test('scrubEventValues: only allowlisted carriers are touched', () => {
   // Allowlisted-skip fields untouched:
   assert.equal(out.release, 'web@1.0.0');
   assert.equal(out.sessionId, 'sess-a@b.com-id');
-  assert.deepEqual(out.user, { id: 'u', email: 'keep@me.com' });
+  assert.deepEqual(out.user, { id: 'u', email: 'keep@me.com', password: '[REDACTED]' });
+  assert.equal(out.requestContext.headers.Authorization, '[REDACTED]');
+  assert.equal(out.fingerprint[0], '[REDACTED]');
 });
 
 test('makeValueScrubberProcessor honors sendDefaultPii', () => {

@@ -8,7 +8,7 @@
  *   setUser / setTag / setIdentity / getSessionId
  */
 
-import { HttpTransport } from './transport';
+import { HttpTransport, type TransportStats } from './transport';
 import { parseStack } from './stack';
 import { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
 import { instrumentBrowserNavigation, __setDefaultBreadcrumbForwarder } from './navigation';
@@ -47,7 +47,7 @@ export const SDK_NAME = 'allstak-react';
 // Keep this in sync with package.json on every version bump.
 declare const __ALLSTAK_REACT_VERSION__: string;
 export const SDK_VERSION: string =
-  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.3.9';
+  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.5.0';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
@@ -96,7 +96,7 @@ export interface AllStakConfig {
    */
   autoRegisterRelease?: boolean;
   /**
-   * Sentry-style release-health "one session per app-launch". When enabled
+   * Release-health "one session per app-launch". When enabled
    * (default `true`), init opens a session (`/ingest/v1/sessions/start`),
    * tracks an in-memory ok/errored/crashed status, and closes the session on
    * graceful shutdown (`/ingest/v1/sessions/end`). Sessions are NEVER sampled
@@ -124,7 +124,7 @@ export interface AllStakConfig {
   offlineQueueKey?: string;
   /**
    * Opt into sending personally-identifiable free-text values. Default
-   * `false` (Sentry parity). This ONLY governs the value-pattern scrubbers
+   * `false`. This ONLY governs the value-pattern scrubbers
    * that strip PII from free-text values (error messages, breadcrumbs,
    * extras, logs, captured HTTP fields):
    *
@@ -160,12 +160,42 @@ export interface AllStakConfig {
   fingerprint?: string[];
   /** Probability in [0, 1] that any new span is recorded. Default 1. */
   tracesSampleRate?: number;
-  /** Master switch for namespace-compatible performance spans. Default: true. */
+  /**
+   * Master switch for the **expensive** performance samplers — the long-task
+   * profiler and the sampled-stack profiler (both additionally gated by
+   * {@link profilesSampleRate}/{@link tracesSampleRate}). Default behavior:
+   * those samplers turn on when `enablePerformance: true` OR a numeric
+   * `tracesSampleRate` is set.
+   *
+   * The **cheap, privacy-safe** signals — Web Vitals ({@link autoWebVitals})
+   * and the one-shot `pageload` span — are NO LONGER gated by this flag; they
+   * ship by default in the browser. Set `enablePerformance: false` to opt out
+   * of the pageload span (and the samplers); Web Vitals are governed solely by
+   * {@link autoWebVitals}/{@link enableWebVitals}.
+   */
   enablePerformance?: boolean;
   /** Mutate or drop a performance span before it leaves the SDK. */
   beforeSendSpan?: (span: SpanData) => SpanData | null | undefined;
   /** URLs that should receive distributed tracing headers. Defaults to all non-AllStak HTTP calls. */
   tracePropagationTargets?: (string | RegExp)[];
+  /**
+   * Auto-instrument outbound HTTP for **distributed tracing**: wrap `fetch`,
+   * `XMLHttpRequest`, and (when present) `axios` to (1) inject the W3C
+   * `traceparent` header (plus AllStak trace baggage) on calls matching
+   * {@link tracePropagationTargets}, and (2) emit a lightweight `http.client`
+   * span per request so client→server traces link up. Default: **true** in
+   * the browser (mirrors {@link autoBreadcrumbsFetch}).
+   *
+   * This is the cheap, privacy-safe slice of HTTP instrumentation:
+   * request/response **bodies and headers are NEVER captured** by this path
+   * regardless of {@link httpTracking} — only method/url/status/duration plus
+   * the trace context. URL query params are still redacted. To additionally
+   * capture bodies/headers (opt-in, off by default) set
+   * {@link enableHttpTracking} `true` and configure {@link httpTracking}.
+   *
+   * Set `false` to disable header propagation + client spans entirely.
+   */
+  enableDistributedTracing?: boolean;
   /** Alias for autoWebVitals. Default: true. */
   enableWebVitals?: boolean;
   /** Browser profile/long-task sampling rate. Default follows tracesSampleRate. */
@@ -207,8 +237,16 @@ export interface AllStakConfig {
    */
   replay?: ReplayOptions;
   /**
-   * Auto-instrument outbound HTTP — wraps `fetch`, `XMLHttpRequest`, and
-   * (when present) `axios`. Default: false.
+   * Opt into **full** HTTP capture on top of distributed tracing — enables the
+   * request/response body + header capture controlled by {@link httpTracking}.
+   * Default: false (bodies/headers stay off).
+   *
+   * NOTE: the fetch/XHR/axios wrappers + `traceparent` propagation + per-request
+   * `http.client` spans are installed by {@link enableDistributedTracing}
+   * (default true), so client→server traces work out of the box without this
+   * flag. Setting `enableHttpTracking: true` only unlocks the privacy-gated
+   * body/header capture; it does NOT re-enable wrappers that
+   * `enableDistributedTracing: false` turned off.
    */
   enableHttpTracking?: boolean;
   /**
@@ -289,6 +327,12 @@ export interface Breadcrumb {
   message: string;
   level: string;
   data?: Record<string, unknown>;
+}
+
+export interface SdkDiagnostics {
+  transport: TransportStats;
+  breadcrumbs: number;
+  sessionId: string;
 }
 
 interface PayloadFrame {
@@ -497,10 +541,20 @@ export class AllStakClient {
       tracesSampleRate: config.tracesSampleRate,
       beforeSendSpan: config.beforeSendSpan,
     });
-    const autoPerformanceEnabled = this.config.enablePerformance === true ||
+    // The EXPENSIVE samplers (long-task observer + sampled-stack profiler)
+    // stay opt-in: on when `enablePerformance: true` OR a numeric
+    // `tracesSampleRate` is set. The CHEAP pageload span + Web Vitals are
+    // decoupled below so a bare `<AllStakProvider apiKey=… />` still ships
+    // privacy-safe performance data.
+    const expensiveProfilersEnabled = this.config.enablePerformance === true ||
       (this.config.enablePerformance !== false && typeof this.config.tracesSampleRate === 'number');
-    if (autoPerformanceEnabled) {
+    // Pageload span is cheap + privacy-safe (one navigation-timing span per
+    // launch). Ship it by default; only `enablePerformance: false` opts out.
+    const pageloadSpanEnabled = this.config.enablePerformance !== false;
+    if (pageloadSpanEnabled) {
       this.capturePageLoadSpan();
+    }
+    if (expensiveProfilersEnabled) {
       this.installLongTaskProfiler();
       this.installSampledStackProfiler();
     }
@@ -523,7 +577,13 @@ export class AllStakClient {
       try { instrumentBrowserNavigation(safeAddBreadcrumb); }
       catch { /* ignore */ }
     }
-    if (config.autoWebVitals !== false && config.enableWebVitals !== false && autoPerformanceEnabled) {
+    // Web Vitals are cheap + privacy-safe (no user content — just CLS/LCP/INP/
+    // FCP/TTFB numbers) and are now governed SOLELY by `autoWebVitals` /
+    // `enableWebVitals` (both default true). Previously this was also gated by
+    // the performance master switch, which made the documented `autoWebVitals:
+    // true` default a silent no-op unless `tracesSampleRate`/`enablePerformance`
+    // was also set.
+    if (config.autoWebVitals !== false && config.enableWebVitals !== false) {
       try {
         // Core Web Vitals are read off the SPAN `measurements` column by the
         // backend (PerformanceRepository classifies op='web.vital' into the
@@ -578,7 +638,17 @@ export class AllStakClient {
         this.replay.start();
       } catch { /* never break init */ }
     }
-    if (config.enableHttpTracking) {
+    // HTTP instrumentation installs the fetch/XHR/axios wrappers that do TWO
+    // things: (1) inject the W3C `traceparent` header + AllStak trace baggage
+    // and emit a per-request `http.client` span (distributed tracing), and
+    // (2) — only when opted in — capture request/response bodies + headers.
+    //
+    // Distributed tracing is DEFAULT-ON in the browser (mirrors
+    // autoBreadcrumbsFetch); full body/header capture stays opt-in behind
+    // `enableHttpTracking`. We install the module when EITHER is requested.
+    const fullHttpCapture = config.enableHttpTracking === true;
+    const distributedTracing = config.enableDistributedTracing !== false;
+    if (fullHttpCapture || distributedTracing) {
       try {
         this.httpRequests = new HttpRequestModule(this.transport);
         this.httpRequests.setValueScrubOptions(this.valueScrubOptions());
@@ -590,9 +660,21 @@ export class AllStakClient {
           sdkName: this.config.sdkName,
           sdkVersion: this.config.sdkVersion,
         });
+        // When only distributed tracing is on (no full capture), FORCE
+        // body/header capture off regardless of any `httpTracking` opts so the
+        // default-on path can never exfiltrate payloads. Query-param redaction
+        // + ignored/allowed-URL filtering still apply.
+        const httpOptions: HttpTrackingOptions = fullHttpCapture
+          ? (config.httpTracking ?? {})
+          : {
+              ...(config.httpTracking ?? {}),
+              captureRequestBody: false,
+              captureResponseBody: false,
+              captureHeaders: false,
+            };
         const { instrumentAxios } = installHttpInstrumentation(
           this.httpRequests,
-          config.httpTracking ?? {},
+          httpOptions,
           baseUrl,
           {
             tracing: this.tracing,
@@ -871,6 +953,13 @@ export class AllStakClient {
   }
   getSessionId(): string { return this.sessionId; }
   getConfig(): AllStakConfig { return this.config; }
+  getDiagnostics(): SdkDiagnostics {
+    return {
+      transport: this.transport.getStats(),
+      breadcrumbs: this.breadcrumbs.length,
+      sessionId: this.sessionId,
+    };
+  }
 
   destroy(): void {
     // Close the release-health session BEFORE tearing down the transport so
@@ -898,6 +987,7 @@ export class AllStakClient {
     this.breadcrumbs = [];
     this.eventProcessors = [];
     this.lastEventKey = null;
+    this.transport.close();
   }
 
   /**
@@ -1021,7 +1111,7 @@ export class AllStakClient {
 
   /**
    * Options for the value-pattern PII scrubbers. `sendDefaultPii` defaults to
-   * `false` (Sentry parity): email + IP value scrubbing on, CC + SSN always
+   * `false`: email + IP value scrubbing on, CC + SSN always
    * on. When `true`, only the email/IP value scrubbers are disabled.
    */
   private valueScrubOptions(): ValueScrubOptions {
@@ -1148,6 +1238,8 @@ export class AllStakClient {
       try { final = await this.config.beforeSend(final); }
       catch { final = payload; /* never let a buggy hook drop telemetry */ }
     }
+    try { final = final ? scrubEventValues(final, this.valueScrubOptions()) : final; }
+    catch { /* final scrubber is fail-open, but transport must never throw here */ }
     if (!final || this.shouldDropDuplicate(final)) return null;
     return final;
   }
@@ -1536,7 +1628,9 @@ export const AllStak = {
   /** Manually instrument an axios instance. No-op when HTTP tracking is off. */
   instrumentAxios<T = any>(axios: T): T { return ensureInit().instrumentAxios(axios); },
   getSessionId(): string { return ensureInit().getSessionId(); },
+  getDiagnostics(): SdkDiagnostics | null { return instance?.getDiagnostics() ?? null; },
   getConfig(): AllStakConfig | null { return instance?.getConfig() ?? null; },
+  close(): void { instance?.destroy(); instance = null; },
   destroy(): void { instance?.destroy(); instance = null; },
   /** @internal */ _getInstance(): AllStakClient | null { return instance; },
 };

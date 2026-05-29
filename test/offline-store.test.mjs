@@ -1,7 +1,7 @@
 /**
  * Offline / persistent event-queue tests for @allstak/react.
  *
- * Sentry-parity goal: buffered telemetry survives a process/app restart AND a
+ * Goal: buffered telemetry survives a process/app restart AND a
  * network outage. Coverage:
  *
  *   A. OfflineStore unit behavior
@@ -48,6 +48,9 @@ const mockFetch = async (url, init) => {
 // `writable` so the HTTP instrumentation can wrap `globalThis.fetch`.
 Object.defineProperty(globalThis, 'fetch', { value: mockFetch, writable: true, configurable: true });
 const baseFetch = mockFetch;
+const restoreBaseFetch = () => {
+  Object.defineProperty(globalThis, 'fetch', { value: baseFetch, writable: true, configurable: true });
+};
 
 // Minimal window stub (records listeners; SDK installs unload hooks on it).
 const listeners = new Map();
@@ -185,6 +188,101 @@ test('7. persist-on-send-failure writes the event to the store', async () => {
   assert.ok(entries.length >= 1);
   assert.equal(entries[0].path, '/ingest/v1/errors');
   assert.match(JSON.stringify(entries[0].payload), /offline-boom/);
+});
+
+test('7b. transport retries a failed buffered event without a new user event', async () => {
+  const storage = makeStorage();
+  let errorCalls = 0;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (url) => {
+      if (String(url).endsWith('/ingest/v1/errors')) {
+        errorCalls++;
+        if (errorCalls === 1) throw new Error('backend down');
+      }
+      return new Response('{}', { status: 202 });
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  AllStak.init({
+    apiKey: 'k',
+    enableOfflineQueue: true,
+    offlineStorage: storage,
+    offlineQueueKey: 'tx7b',
+    autoCaptureBrowserErrors: false,
+    enableAutoSessionTracking: false,
+    autoRegisterRelease: false,
+    enablePerformance: false,
+    autoWebVitals: false,
+    enableDistributedTracing: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsNavigation: false,
+    autoBreadcrumbsConsole: false,
+  });
+  AllStak.captureException(new Error('retry-me'));
+  await wait(700);
+
+  assert.equal(errorCalls, 2, 'retry timer re-sends without another event');
+  const diagnostics = AllStak.getDiagnostics();
+  assert.equal(diagnostics.transport.queued, 0);
+  assert.equal(diagnostics.transport.sent, 1);
+  assert.equal(diagnostics.transport.persisted, 1);
+  assert.equal(storage.getItem('tx7b'), null);
+  AllStak.destroy();
+  restoreBaseFetch();
+});
+
+test('7c. circuit-open events are persisted and buffer overflow is counted', async () => {
+  const storage = makeStorage();
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async () => { throw new Error('still down'); },
+    writable: true,
+    configurable: true,
+  });
+  AllStak.init({
+    apiKey: 'k',
+    enableOfflineQueue: true,
+    offlineStorage: storage,
+    offlineQueueKey: 'tx7c',
+    autoCaptureBrowserErrors: false,
+    enableAutoSessionTracking: false,
+    autoRegisterRelease: false,
+    enablePerformance: false,
+    autoWebVitals: false,
+    enableDistributedTracing: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsNavigation: false,
+    autoBreadcrumbsConsole: false,
+  });
+  for (let i = 0; i < 4; i++) AllStak.captureException(new Error(`circuit-${i}`));
+  await wait(80);
+  assert.ok(AllStak.getDiagnostics().transport.circuitOpenUntil > Date.now(), 'circuit is open after repeated failures');
+
+  AllStak.captureException(new Error('duringCircuit'));
+  await wait(20);
+  const persisted = JSON.parse(storage.getItem('tx7c') || '[]');
+  assert.ok(persisted.some((e) => /duringCircuit/.test(JSON.stringify(e.payload))), 'circuit-open item is persisted');
+  AllStak.destroy();
+
+  AllStak.init({
+    apiKey: 'k',
+    enableOfflineQueue: false,
+    autoCaptureBrowserErrors: false,
+    enableAutoSessionTracking: false,
+    autoRegisterRelease: false,
+    enablePerformance: false,
+    autoWebVitals: false,
+    enableDistributedTracing: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsNavigation: false,
+    autoBreadcrumbsConsole: false,
+  });
+  for (let i = 0; i < 150; i++) AllStak.captureException(new Error(`overflow-${i}`));
+  await wait(80);
+  assert.ok(AllStak.getDiagnostics().transport.dropped > 0, 'overflow drops are counted when persistence is unavailable');
+  AllStak.destroy();
+  restoreBaseFetch();
 });
 
 test('8. drain-and-resend-on-init replays a persisted event then removes it on 2xx', async () => {

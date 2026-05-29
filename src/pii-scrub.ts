@@ -1,5 +1,5 @@
 /**
- * Value-pattern PII scrubbing — Sentry data-scrubbing parity.
+ * Value-pattern PII scrubbing.
  *
  * The SDK already redacts by KEY NAME (password / token / cookie / api_key …)
  * in `http-redact.ts`. This module adds VALUE-PATTERN scrubbing for PII that
@@ -48,7 +48,7 @@ export interface ValueScrubOptions {
   /**
    * When true the user has opted into PII collection — the (B) scrubbers
    * (email + IP) are disabled. The (A) scrubbers (CC + SSN) are ALWAYS on.
-   * Default false (Sentry parity).
+   * Default false.
    */
   sendDefaultPii?: boolean;
 }
@@ -88,6 +88,49 @@ const IPV4 =
  */
 const IPV6 =
   /(?<![:.\w])(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}(?![:.\w])|(?<![:.\w])(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:?){0,7}[0-9a-fA-F]{0,4}(?![:.\w])/g;
+
+/** Authorization/token values in free text. Always scrubbed. */
+const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
+const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
+
+const SENSITIVE_KEY_PARTS = [
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'password',
+  'passwd',
+  'passphrase',
+  'secret',
+  'token',
+  'api-key',
+  'api_key',
+  'apikey',
+  'access-token',
+  'access_token',
+  'refresh-token',
+  'refresh_token',
+  'id-token',
+  'id_token',
+  'jwt',
+  'bearer',
+  'private-key',
+  'private_key',
+  'client-secret',
+  'client_secret',
+];
+
+function normalizedKey(key: string): string {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/[.\s]+/g, '-')
+    .toLowerCase();
+}
+
+function isSensitiveKey(key: string): boolean {
+  const normalized = normalizedKey(key);
+  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));
+}
 
 /**
  * Luhn checksum. Operates on a digits-only string. Returns false for empty
@@ -134,6 +177,10 @@ export function scrubString(input: string, opts: ValueScrubOptions = {}): string
 
     // (A) SSN — hyphens required.
     out = replaceAll(out, SSN);
+
+    // (A) bearer/JWT tokens — credentials are never valid telemetry.
+    out = replaceAll(out, BEARER_VALUE);
+    out = replaceAll(out, JWT_VALUE);
 
     // (B) email + IP — only when the user has NOT opted into PII.
     if (opts.sendDefaultPii !== true) {
@@ -191,6 +238,11 @@ export function scrubDeep<T>(value: T, opts: ValueScrubOptions = {}, depth = 0):
     let changed = false;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (isSensitiveKey(k)) {
+        changed = true;
+        out[k] = REDACTED;
+        continue;
+      }
       const scrubbed = scrubDeep(v, opts, depth + 1);
       if (scrubbed !== v) changed = true;
       out[k] = scrubbed;
@@ -217,6 +269,9 @@ export interface ScrubbablePayload {
   message?: string;
   metadata?: Record<string, unknown>;
   breadcrumbs?: ScrubbableBreadcrumb[];
+  user?: object;
+  requestContext?: object;
+  fingerprint?: string[];
   // Fields we DELIBERATELY never touch are not read here, but listing the
   // common ones documents intent for future maintainers:
   //   user (explicit setUser — intentional identification, ships as-is)
@@ -233,10 +288,13 @@ export interface ScrubbablePayload {
  *
  *   - `message`            (error/exception message)
  *   - `metadata`           (extras / tags / contexts / per-call context)
+ *   - `requestContext`
+ *   - `user`               (key/value secrets only; explicit email/id survive)
+ *   - `fingerprint`
  *   - `breadcrumbs[].message` + `breadcrumbs[].data`
  *
- * Everything else (user object, frames, release/sdk/version, trace/session
- * ids, requestContext URLs) is left untouched. Fail-open: any error returns
+ * Everything else (frames, release/sdk/version, trace/session ids) is left untouched.
+ * Fail-open: any error returns
  * the event unchanged so a scrubber bug can never drop telemetry.
  */
 export function scrubEventValues<T extends ScrubbablePayload>(
@@ -250,6 +308,15 @@ export function scrubEventValues<T extends ScrubbablePayload>(
     }
     if (event.metadata && typeof event.metadata === 'object') {
       event.metadata = scrubDeep(event.metadata, opts);
+    }
+    if (event.requestContext && typeof event.requestContext === 'object') {
+      event.requestContext = scrubDeep(event.requestContext, opts);
+    }
+    if (event.user && typeof event.user === 'object') {
+      event.user = scrubDeep(event.user, { ...opts, sendDefaultPii: true });
+    }
+    if (Array.isArray(event.fingerprint)) {
+      event.fingerprint = event.fingerprint.map((part) => scrubString(String(part), opts));
     }
     if (Array.isArray(event.breadcrumbs)) {
       event.breadcrumbs = event.breadcrumbs.map((crumb) => {
@@ -276,4 +343,3 @@ export function makeValueScrubberProcessor<T extends ScrubbablePayload>(
 ): (event: T) => T {
   return (event: T) => scrubEventValues(event, opts);
 }
-

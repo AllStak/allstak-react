@@ -51,6 +51,16 @@ function makeTransport() {
   };
 }
 
+function makeStorage(initial = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    getItem(key) { return data.get(key) ?? null; },
+    setItem(key, value) { data.set(key, value); },
+    removeItem(key) { data.delete(key); },
+  };
+}
+
 const SESSION_ID = '00000000-0000-4000-8000-000000000000';
 
 // ───────────────────────────────────────────────────────────────
@@ -178,6 +188,77 @@ test('an explicit finalStatus overrides the accumulated status', () => {
   tracker.recordError();
   tracker.end('abnormal');
   assert.equal(tx.calls.find((c) => c.path.endsWith('/sessions/end')).payload.status, 'abnormal');
+});
+
+test('abnormal recovery: clean shutdown does not report abnormal on next start', () => {
+  const storage = makeStorage();
+  const key = 'allstak.session.react.clean';
+  const first = makeTransport();
+  const tracker = new SessionTracker(first, { release: 'r' }, 'sid-clean', { storage, storageKey: key });
+  tracker.start();
+  tracker.end();
+
+  const second = makeTransport();
+  new SessionTracker(second, { release: 'r' }, 'sid-next', { storage, storageKey: key }).start();
+
+  assert.equal(second.calls.filter((c) => c.path.endsWith('/sessions/end')).length, 0);
+  assert.equal(second.calls.filter((c) => c.path.endsWith('/sessions/start')).length, 1);
+});
+
+test('abnormal recovery: previous open session is reported abnormal on next start', () => {
+  const storage = makeStorage();
+  const key = 'allstak.session.react.abnormal';
+  new SessionTracker(makeTransport(), { release: 'r' }, 'sid-open', { storage, storageKey: key }).start();
+
+  const second = makeTransport();
+  new SessionTracker(second, { release: 'r' }, 'sid-next', { storage, storageKey: key }).start();
+
+  const recovered = second.calls.find((c) => c.path.endsWith('/sessions/end'));
+  assert.ok(recovered);
+  assert.equal(recovered.payload.sessionId, 'sid-open');
+  assert.equal(recovered.payload.status, 'abnormal');
+});
+
+test('abnormal recovery: previous crashed open session is reported crashed', () => {
+  const storage = makeStorage();
+  const key = 'allstak.session.react.crashed';
+  const tracker = new SessionTracker(makeTransport(), { release: 'r' }, 'sid-crashed', { storage, storageKey: key });
+  tracker.start();
+  tracker.recordCrash();
+
+  const second = makeTransport();
+  new SessionTracker(second, { release: 'r' }, 'sid-next', { storage, storageKey: key }).start();
+
+  const recovered = second.calls.find((c) => c.path.endsWith('/sessions/end'));
+  assert.ok(recovered);
+  assert.equal(recovered.payload.sessionId, 'sid-crashed');
+  assert.equal(recovered.payload.status, 'crashed');
+});
+
+test('abnormal recovery: corrupt session state is dropped safely', () => {
+  const key = 'allstak.session.react.corrupt';
+  const storage = makeStorage({ [key]: '{not-json' });
+  const tx = makeTransport();
+  assert.doesNotThrow(() => new SessionTracker(tx, { release: 'r' }, 'sid-new', { storage, storageKey: key }).start());
+  assert.equal(tx.calls.filter((c) => c.path.endsWith('/sessions/end')).length, 0);
+  assert.equal(tx.calls.filter((c) => c.path.endsWith('/sessions/start')).length, 1);
+});
+
+test('abnormal recovery: repeated starts do not duplicate the recovered abnormal report', () => {
+  const storage = makeStorage();
+  const key = 'allstak.session.react.dedupe';
+  new SessionTracker(makeTransport(), { release: 'r' }, 'sid-open', { storage, storageKey: key }).start();
+
+  const second = makeTransport();
+  const secondTracker = new SessionTracker(second, { release: 'r' }, 'sid-second', { storage, storageKey: key });
+  secondTracker.start();
+  secondTracker.end();
+
+  const third = makeTransport();
+  new SessionTracker(third, { release: 'r' }, 'sid-third', { storage, storageKey: key }).start();
+
+  assert.equal(second.calls.filter((c) => c.path.endsWith('/sessions/end') && c.payload.status === 'abnormal').length, 1);
+  assert.equal(third.calls.filter((c) => c.path.endsWith('/sessions/end') && c.payload.status === 'abnormal').length, 0);
 });
 
 // ───────────────────────────────────────────────────────────────

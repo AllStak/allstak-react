@@ -12,8 +12,26 @@ export interface AllStakProviderProps {
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   debug?: boolean;
+  /**
+   * Default true (browser). Auto-instrument outbound HTTP for distributed
+   * tracing: inject the W3C `traceparent` header on matching calls and emit a
+   * lightweight `http.client` span per request, so client→server traces link
+   * up with zero per-call code. Bodies/headers are never captured by this
+   * path — set {@link enableHttpTracking} to opt into that. Set `false` to
+   * disable header propagation + client spans.
+   */
+  enableDistributedTracing?: boolean;
+  /** Default false. Opt into request/response body + header capture on top of distributed tracing. */
   enableHttpTracking?: boolean;
   httpTracking?: AllStakConfig['httpTracking'];
+  /** URLs that should receive distributed tracing headers. Defaults to all non-AllStak HTTP calls. */
+  tracePropagationTargets?: AllStakConfig['tracePropagationTargets'];
+  /**
+   * Master switch for the expensive performance samplers (long-task +
+   * sampled-stack). Web Vitals and the pageload span ship by default and are
+   * NOT gated by this. Set `false` to also drop the pageload span.
+   */
+  enablePerformance?: boolean;
   captureScreenshotOnError?: AllStakConfig['captureScreenshotOnError'];
   screenshotRedaction?: AllStakConfig['screenshotRedaction'];
   screenshotMaxBytes?: AllStakConfig['screenshotMaxBytes'];
@@ -134,8 +152,11 @@ export function AllStakProvider({
   user,
   tags,
   debug,
+  enableDistributedTracing,
   enableHttpTracking,
   httpTracking,
+  tracePropagationTargets,
+  enablePerformance,
   captureScreenshotOnError,
   screenshotRedaction,
   screenshotMaxBytes,
@@ -184,8 +205,11 @@ export function AllStakProvider({
         tunnel,
         user,
         tags,
+        enableDistributedTracing,
         enableHttpTracking,
         httpTracking,
+        tracePropagationTargets,
+        enablePerformance,
         captureScreenshotOnError,
         screenshotRedaction,
         screenshotMaxBytes,

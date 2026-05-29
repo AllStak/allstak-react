@@ -24,6 +24,14 @@ type AddBreadcrumbFn = (
 const FETCH_FLAG = '__allstak_fetch_patched__';
 const CONSOLE_FLAG = '__allstak_console_patched__';
 
+// The HTTP-tracking module (src/http-instrumentation.ts) also wraps
+// `globalThis.fetch`, tagging its wrapper with this flag. Both wrappers are
+// installed at init (distributed tracing is default-on), so each must carry
+// forward the OTHER's flag onto the new top-level function — otherwise a
+// second `init()` (Fast Refresh, re-mount) sees a wrapper that lacks its own
+// flag and stacks a duplicate, double-firing breadcrumbs / events.
+const HTTP_FETCH_FLAG = '__allstak_http_fetch_patched__';
+
 export function instrumentFetch(
   addBreadcrumb: AddBreadcrumbFn,
   ownBaseUrl?: string,
@@ -70,6 +78,11 @@ export function instrumentFetch(
     }
   };
   (wrapped as any)[FETCH_FLAG] = true;
+  // Preserve the HTTP-tracking wrapper's flag (if it wrapped first) so it is
+  // still visible on the new top-level fetch and never gets re-applied.
+  if ((originalFetch as any)[HTTP_FETCH_FLAG]) {
+    (wrapped as any)[HTTP_FETCH_FLAG] = true;
+  }
   g.fetch = wrapped;
 }
 

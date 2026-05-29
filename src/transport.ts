@@ -79,6 +79,18 @@ export interface HttpTransportOptions {
   offlineStore?: OfflineStore;
 }
 
+export interface TransportStats {
+  queued: number;
+  sent: number;
+  failed: number;
+  dropped: number;
+  persisted: number;
+  replayed: number;
+  consecutiveFailures: number;
+  circuitOpenUntil: number;
+  retryAttempts: number;
+}
+
 export interface AttachmentUpload {
   contentType: string;
   dataBase64: string;
@@ -98,6 +110,16 @@ export class HttpTransport {
   private flushing = false;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimerDueAt = 0;
+  private sent = 0;
+  private failed = 0;
+  private dropped = 0;
+  private persisted = 0;
+  private replayed = 0;
+  private retryAttempts = 0;
+  private pendingRetryDelayMs = 0;
+  private closed = false;
 
   constructor(
     private baseUrl: string,
@@ -106,11 +128,15 @@ export class HttpTransport {
   ) {}
 
   send(path: string, payload: unknown, options: { timeoutMs?: number } = {}): Promise<void> {
+    if (this.closed && !isPersistablePath(path)) {
+      return Promise.resolve();
+    }
     this.enqueueOrDispatch({ path, payload, timeoutMs: options.timeoutMs });
     return Promise.resolve();
   }
 
   uploadAttachment(eventId: string, attachment: AttachmentUpload, options: { timeoutMs?: number } = {}): Promise<void> {
+    if (this.closed) return Promise.resolve();
     const dedupeKey = `attachment:${eventId}:screenshot`;
     this.enqueueOrDispatch({
       path: `/ingest/v1/errors/${encodeURIComponent(eventId)}/attachments`,
@@ -134,7 +160,9 @@ export class HttpTransport {
   private enqueueOrDispatch(item: Pending): void {
     if (item.dedupeKey && (this.bufferedKeys.has(item.dedupeKey) || this.inFlightKeys.has(item.dedupeKey))) return;
     if (Date.now() < this.circuitOpenUntil) {
+      this.persistOnFailure(item);
       this.push(item);
+      this.scheduleFlush();
       return;
     }
     this.track(this.dispatch(item));
@@ -151,18 +179,27 @@ export class HttpTransport {
       await this.doFetch(item.path, item.payload, item.timeoutMs);
       this.consecutiveFailures = 0;
       this.circuitOpenUntil = 0;
+      this.sent++;
       this.onDelivered(item);
-      this.scheduleFlush();
+      if (!this.closed) this.scheduleFlush();
     } catch (err) {
       if (this.isPermanentDrop(err)) {
         // 4xx (non-429): the server rejected it for good. Don't retry or keep
         // persisting — drop it (and remove any persisted copy).
+        this.dropped++;
         this.onDelivered(item);
         return;
       }
-      this.recordFailure(err);
+      this.failed++;
+      if (this.closed) {
+        this.persistOnFailure(item);
+        if (!item.persistedId && isPersistablePath(item.path)) this.dropped++;
+        return;
+      }
+      const retryDelay = this.recordFailure(err);
       this.persistOnFailure(item);
       this.push(item);
+      this.scheduleFlush(retryDelay);
     } finally {
       if (item.dedupeKey) this.inFlightKeys.delete(item.dedupeKey);
     }
@@ -194,7 +231,10 @@ export class HttpTransport {
     if (!isPersistablePath(item.path)) return;
     if (item.persistedId) return;
     const id = store.persist(item.path, item.payload);
-    if (id) item.persistedId = id;
+    if (id) {
+      item.persistedId = id;
+      this.persisted++;
+    }
   }
 
   /** Remove an item's persisted copy once it is delivered or permanently dropped. */
@@ -226,29 +266,56 @@ export class HttpTransport {
   }
 
   private push(item: Pending): void {
+    if (this.closed) {
+      this.persistOnFailure(item);
+      if (!item.persistedId && isPersistablePath(item.path)) this.dropped++;
+      return;
+    }
     if (item.dedupeKey && this.bufferedKeys.has(item.dedupeKey)) return;
-    if (this.buffer.length >= MAX_BUFFER) this.buffer.shift();
+    if (this.buffer.length >= MAX_BUFFER) {
+      const evicted = this.buffer.shift();
+      if (evicted?.dedupeKey) this.bufferedKeys.delete(evicted.dedupeKey);
+      if (evicted && !evicted.persistedId) {
+        this.persistOnFailure(evicted);
+      }
+      if (evicted && !evicted.persistedId) this.dropped++;
+    }
     this.buffer.push(item);
     if (item.dedupeKey) this.bufferedKeys.add(item.dedupeKey);
   }
 
-  private scheduleFlush(): void {
-    if (this.flushing || this.buffer.length === 0) return;
-    const delay = Math.max(0, this.circuitOpenUntil - Date.now());
+  private scheduleFlush(delayMs = 0): void {
+    if (this.closed) return;
+    if (this.buffer.length === 0) return;
+    if (this.flushing) {
+      this.pendingRetryDelayMs = Math.max(this.pendingRetryDelayMs, delayMs);
+      return;
+    }
+    const delay = Math.max(delayMs, this.pendingRetryDelayMs, Math.max(0, this.circuitOpenUntil - Date.now()));
+    this.pendingRetryDelayMs = 0;
+    const dueAt = Date.now() + delay;
+    if (this.retryTimer && this.retryTimerDueAt <= dueAt) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimerDueAt = dueAt;
     const timer = setTimeout(() => {
+      this.retryTimer = null;
+      this.retryTimerDueAt = 0;
       void this.flushBuffer().catch(() => undefined);
     }, delay);
+    this.retryTimer = timer;
     if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
   }
 
   private async flushBuffer(): Promise<void> {
     if (this.flushing || this.buffer.length === 0) return;
+    if (this.closed) return;
     this.flushing = true;
     try {
       const items = this.buffer.splice(0, this.buffer.length);
       this.bufferedKeys.clear();
       for (const item of items) {
         if (Date.now() < this.circuitOpenUntil) {
+          this.persistOnFailure(item);
           this.push(item);
           continue;
         }
@@ -256,15 +323,24 @@ export class HttpTransport {
           await this.doFetch(item.path, item.payload, item.timeoutMs);
           this.consecutiveFailures = 0;
           this.circuitOpenUntil = 0;
+          this.sent++;
           this.onDelivered(item);
         } catch (err) {
           if (this.isPermanentDrop(err)) {
+            this.dropped++;
             this.onDelivered(item);
             continue;
           }
-          this.recordFailure(err);
+          this.failed++;
+          if (this.closed) {
+            this.persistOnFailure(item);
+            if (!item.persistedId && isPersistablePath(item.path)) this.dropped++;
+            continue;
+          }
+          const retryDelay = this.recordFailure(err);
           this.persistOnFailure(item);
           this.push(item);
+          this.scheduleFlush(retryDelay);
         }
       }
     } finally {
@@ -273,14 +349,18 @@ export class HttpTransport {
     }
   }
 
-  private recordFailure(error: unknown): void {
+  private recordFailure(error: unknown): number {
     this.consecutiveFailures++;
-    if (this.consecutiveFailures < FAILURE_THRESHOLD) return;
+    this.retryAttempts++;
     const backoff = jitteredBackoff(this.consecutiveFailures);
     // A real `Retry-After` from a 429/503 response overrides the computed
     // backoff; otherwise fall back to the jittered exponential backoff.
     const retryAfterMs = retryAfterFromResponse(error);
-    this.circuitOpenUntil = Date.now() + (retryAfterMs > 0 ? retryAfterMs : backoff);
+    const delay = retryAfterMs > 0 ? retryAfterMs : backoff;
+    if (this.consecutiveFailures >= FAILURE_THRESHOLD) {
+      this.circuitOpenUntil = Date.now() + delay;
+    }
+    return delay;
   }
 
   getBufferSize(): number {
@@ -329,6 +409,7 @@ export class HttpTransport {
         store.remove(entry.id);
         continue;
       }
+      this.replayed++;
       this.enqueueOrDispatch({ path: entry.path, payload: entry.payload, persistedId: entry.id });
     }
   }
@@ -377,14 +458,38 @@ export class HttpTransport {
       } else {
         // Couldn't beacon — persist so it survives to the next launch.
         this.persistOnFailure(item);
+        if (!item.persistedId) this.dropped++;
       }
     }
     return beaconed;
   }
+
+  close(): void {
+    this.closed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryTimerDueAt = 0;
+    this.pendingRetryDelayMs = 0;
+    this.flushToBeacon();
+  }
+
+  getStats(): TransportStats {
+    return {
+      queued: this.buffer.length,
+      sent: this.sent,
+      failed: this.failed,
+      dropped: this.dropped,
+      persisted: this.persisted,
+      replayed: this.replayed,
+      consecutiveFailures: this.consecutiveFailures,
+      circuitOpenUntil: this.circuitOpenUntil,
+      retryAttempts: this.retryAttempts,
+    };
+  }
 }
 
 function jitteredBackoff(failures: number): number {
-  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
+  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(8, failures - 1)));
   return Math.floor(exp / 2 + Math.random() * (exp / 2));
 }
 

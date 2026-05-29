@@ -85,9 +85,13 @@ export default defineConfig({
 | `user` | Initial user context. |
 | `tags` | Tags added to every event. |
 | `tracesSampleRate` | Span sample rate from `0` to `1`. |
-| `enableWebVitals` | Captures CLS, LCP, INP, FCP, and TTFB. |
+| `enableDistributedTracing` | Default `true`. Auto-injects the W3C `traceparent` header and emits an `http.client` span per outbound request, with no per-call code. Privacy-safe: never captures bodies/headers. Set `false` to opt out. |
+| `enableHttpTracking` | Default `false`. Opt into request/response body + header capture (configured via `httpTracking`) on top of distributed tracing. |
+| `tracePropagationTargets` | URLs that should receive the trace headers. Defaults to all non-AllStak HTTP calls. |
+| `enableWebVitals` / `autoWebVitals` | Default `true`. Captures CLS, LCP, INP, FCP, and TTFB. Ships by default — no `tracesSampleRate` / `enablePerformance` required. |
+| `enablePerformance` | Default behavior: pageload span ships by default (`false` opts out); also gates the long-task / sampled-stack profilers (on when `true` or a numeric `tracesSampleRate` is set). |
 | `autoCaptureBrowserErrors` | Captures global browser errors. |
-| `autoBreadcrumbsFetch` | Adds fetch breadcrumbs and HTTP telemetry. |
+| `autoBreadcrumbsFetch` | Adds fetch breadcrumbs. |
 | `captureConsole` | Controls console capture by level. |
 | `beforeSend` | Optional hook to modify or drop error events. |
 
