@@ -189,8 +189,12 @@ export interface AllStakConfig {
   captureConsole?: ConsoleCaptureOptions;
   /**
    * Auto-capture Web Vitals (CLS, LCP, INP, FCP, TTFB) via the browser's
-   * PerformanceObserver. Default: true. Each metric ships as a
-   * `web_vitals` log on the next backend flush.
+   * PerformanceObserver. Default: true (in browser contexts). On the
+   * standard reporting moment (visibilitychange→hidden / pagehide) the
+   * collected metrics ship as a single `web.vital` span whose
+   * `measurements` map (`{ LCP, CLS, INP, FCP, TTFB }`) is what the
+   * backend surfaces on the web-vitals dashboard. A per-metric
+   * `web-vital` log is also sent for backward-compat.
    */
   autoWebVitals?: boolean;
   /** Wrap `history.pushState`/`replaceState` and listen to `popstate` for SPA navigation breadcrumbs. Default: true */
@@ -521,40 +525,49 @@ export class AllStakClient {
     }
     if (config.autoWebVitals !== false && config.enableWebVitals !== false && autoPerformanceEnabled) {
       try {
-        const send = (m: { name: string; value: number; id?: string }) => {
-          const metricName = m.name.toLowerCase();
-          const span = this.tracing.startSpan(`web.vital.${metricName}`, {
+        // Core Web Vitals are read off the SPAN `measurements` column by the
+        // backend (PerformanceRepository classifies op='web.vital' into the
+        // "web" performance category). We emit ALL collected metrics as a
+        // single `web.vital` span with the uppercase-keyed measurements map
+        // — that is how vitals reach the web-vitals dashboard. Per-metric
+        // logs are kept for backward-compat with the older log channel.
+        const send = (metrics: Record<string, number>) => {
+          const names = Object.keys(metrics);
+          if (names.length === 0) return;
+          const route = typeof location !== 'undefined' ? location.pathname || '/' : '/';
+          const span = this.tracing.startSpan('web.vital', {
             op: 'web.vital',
             platform: 'web',
-            description: m.name,
-            measurements: { [metricName]: m.value },
+            description: 'Core Web Vitals',
+            measurements: { ...metrics },
             attributes: {
-              metric: m.name,
-              route: typeof location !== 'undefined' ? location.pathname || '/' : '/',
+              metrics: names.join(','),
+              route,
               session_id: this.sessionId,
-              ...(m.id ? { metric_id: m.id } : {}),
             },
-            tags: { metric: m.name },
+            tags: { route },
           });
           span.finish('ok');
-          this.transport.send(LOGS_PATH, {
-            timestamp: new Date().toISOString(),
-            level: 'info',
-            message: `web-vital:${m.name}=${m.value.toFixed(2)}`,
-            sessionId: this.sessionId,
-            environment: this.config.environment,
-            release: this.config.release,
-            platform: this.config.platform,
-            sdkName: this.config.sdkName,
-            sdkVersion: this.config.sdkVersion,
-            metadata: {
-              category: 'web-vital',
-              name: m.name,
-              value: m.value,
-              ...(m.id ? { id: m.id } : {}),
-              ...this.releaseTags(),
-            },
-          });
+          for (const name of names) {
+            const value = metrics[name];
+            this.transport.send(LOGS_PATH, {
+              timestamp: new Date().toISOString(),
+              level: 'info',
+              message: `web-vital:${name}=${value.toFixed(2)}`,
+              sessionId: this.sessionId,
+              environment: this.config.environment,
+              release: this.config.release,
+              platform: this.config.platform,
+              sdkName: this.config.sdkName,
+              sdkVersion: this.config.sdkVersion,
+              metadata: {
+                category: 'web-vital',
+                name,
+                value,
+                ...this.releaseTags(),
+              },
+            });
+          }
         };
         this.webVitals = startWebVitals(send);
       } catch { /* never break init */ }

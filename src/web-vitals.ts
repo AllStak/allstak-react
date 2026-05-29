@@ -2,9 +2,11 @@
  * Lightweight Web Vitals collection via the browser's PerformanceObserver.
  *
  * Captures CLS, LCP, INP, FCP, TTFB without pulling in the `web-vitals`
- * package as a runtime dependency. Each metric is shipped as a single
- * `web_vital` log on the SDK's `/ingest/v1/logs` channel — so the
- * dashboard can chart them alongside other logs.
+ * package as a runtime dependency. On the standard reporting moment
+ * (visibilitychange→hidden / pagehide) every collected metric is handed
+ * to the reporter as a single uppercase-keyed map so the caller can ship
+ * it as one `web.vital` SPAN with a `measurements` map — that is the wire
+ * shape the backend reads for the web-vitals dashboard (op='web.vital').
  *
  * Privacy: only numeric values + the metric name are sent. No URLs,
  * referrers, or user-identifiable data.
@@ -19,11 +21,18 @@
  *   - **LCP** (Largest Contentful Paint) — biggest paint entry's startTime
  *   - **INP** (Interaction to Next Paint) — longest event-timing duration
  *   - **FCP** (First Contentful Paint) — first paint named `first-contentful-paint`
- *   - **TTFB** (Time to First Byte) — `responseStart - requestStart` from the
- *     navigation timing entry
+ *   - **TTFB** (Time to First Byte) — `responseStart` from the navigation
+ *     timing entry
  */
 
-type VitalsReporter = (metric: { name: string; value: number; id?: string }) => void;
+/**
+ * Receives the finalized Web Vitals as a single map of uppercase metric
+ * names → numeric values (only the metrics that were actually collected
+ * are present). Called at most once per page (guarded against
+ * double-send). The caller is expected to emit this as a `web.vital` span
+ * with the map as its `measurements`.
+ */
+export type VitalsReporter = (metrics: Record<string, number>) => void;
 
 const FLAG = '__allstak_web_vitals_started__';
 
@@ -35,6 +44,11 @@ export interface WebVitalsHandle {
 /**
  * Start collecting Web Vitals. Returns a handle whose `destroy()` cleans
  * up all PerformanceObservers. Safe no-op on non-browser runtimes.
+ *
+ * The `report` callback is invoked once, on the first hide/unload signal,
+ * with the full set of collected metrics in a single uppercase-keyed map
+ * (e.g. `{ LCP, CLS, INP, FCP, TTFB }`) so the caller can emit a single
+ * `web.vital` span.
  */
 export function startWebVitals(report: VitalsReporter): WebVitalsHandle {
   const noop: WebVitalsHandle = { destroy: () => {} };
@@ -105,25 +119,33 @@ export function startWebVitals(report: VitalsReporter): WebVitalsHandle {
   } catch { /* unsupported */ }
 
   // ── TTFB ─────────────────────────────────────────────────────────
-  // From the navigation timing entry. Reported once on first read.
-  const reportTtfb = (): void => {
+  // From the navigation timing entry: responseStart is the time-to-first-byte
+  // relative to navigation start.
+  const readTtfb = (): number | null => {
     try {
       const navEntry = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
-      if (navEntry && typeof navEntry.responseStart === 'number' && typeof navEntry.requestStart === 'number') {
-        const ttfb = Math.max(0, navEntry.responseStart - navEntry.requestStart);
-        report({ name: 'TTFB', value: ttfb });
+      if (navEntry && typeof navEntry.responseStart === 'number') {
+        return Math.max(0, navEntry.responseStart);
       }
     } catch { /* ignore */ }
+    return null;
   };
 
   // Final flush on hide/unload — this is when LCP/CLS/INP are most
-  // accurate (after the page is done interacting).
+  // accurate (after the page is done interacting). Guarded so we emit at
+  // most one span per page even if both visibilitychange and pagehide fire.
+  let sent = false;
   const finalize = (): void => {
-    if (lastLcp > 0) report({ name: 'LCP', value: lastLcp });
-    report({ name: 'CLS', value: cls });
-    if (maxInteraction > 0) report({ name: 'INP', value: maxInteraction });
-    if (fcp > 0) report({ name: 'FCP', value: fcp });
-    reportTtfb();
+    if (sent) return;
+    sent = true;
+    const metrics: Record<string, number> = {};
+    if (lastLcp > 0) metrics.LCP = lastLcp;
+    metrics.CLS = cls;
+    if (maxInteraction > 0) metrics.INP = maxInteraction;
+    if (fcp > 0) metrics.FCP = fcp;
+    const ttfb = readTtfb();
+    if (ttfb != null) metrics.TTFB = ttfb;
+    try { report(metrics); } catch { /* never break on report */ }
   };
 
   // visibilitychange is the most reliable signal — pagehide / unload

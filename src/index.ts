@@ -54,7 +54,7 @@ export type { ConsoleCaptureOptions } from './auto-breadcrumbs';
 
 // ── Web Vitals ──────────────────────────────────────────────────
 export { startWebVitals, __resetWebVitalsFlagForTest } from './web-vitals';
-export type { WebVitalsHandle } from './web-vitals';
+export type { WebVitalsHandle, VitalsReporter } from './web-vitals';
 
 // ── Replay surrogate ────────────────────────────────────────────
 export { ReplayRecorder } from './replay';
