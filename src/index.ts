@@ -65,6 +65,18 @@ export type { HttpTrackingOptions } from './http-redact';
 export { HttpRequestModule } from './http-requests';
 export type { HttpRequestEvent } from './http-requests';
 
+// ── Value-pattern PII scrubbing ─────────────────────────────────
+// `sendDefaultPii` (AllStakConfig) toggles email/IP scrubbing (default
+// false = Sentry parity). CC (Luhn-valid) + SSN are always scrubbed. The
+// scrubbers are exported for unit tests and advanced/custom processors.
+export {
+  scrubString,
+  scrubDeep,
+  scrubEventValues,
+  makeValueScrubberProcessor,
+} from './pii-scrub';
+export type { ValueScrubOptions, ScrubbablePayload } from './pii-scrub';
+
 // ── Transport internals (test surface) ──────────────────────────
 // Exposed for unit-testing the Retry-After parser. Not part of the
 // public API contract.

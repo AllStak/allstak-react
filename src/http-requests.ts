@@ -15,6 +15,7 @@
  */
 
 import type { HttpTransport } from './transport';
+import { scrubString, scrubDeep, type ValueScrubOptions } from './pii-scrub';
 
 const INGEST_PATH = '/ingest/v1/http-requests';
 const FLUSH_INTERVAL_MS = 5_000;
@@ -112,11 +113,32 @@ export class HttpRequestModule {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private destroyed = false;
   private defaults: ModuleDefaults = {};
+  private scrubOptions: ValueScrubOptions = {};
 
   constructor(private transport: HttpTransport) {}
 
   setDefaults(defaults: ModuleDefaults): void {
     this.defaults = { ...this.defaults, ...defaults };
+  }
+
+  /**
+   * Configure value-pattern PII scrubbing applied to captured free-text HTTP
+   * fields (request/response body, error string, header values). URL / host /
+   * path are NOT scrubbed here — they pass through the URL redactor upstream.
+   * CC + SSN are always scrubbed; email + IP honor `sendDefaultPii`.
+   */
+  setValueScrubOptions(opts: ValueScrubOptions): void {
+    this.scrubOptions = opts;
+  }
+
+  private scrub(s?: string): string | undefined {
+    if (s == null) return s;
+    try { return scrubString(s, this.scrubOptions); } catch { return s; }
+  }
+
+  private scrubHeaders(h?: Record<string, string>): Record<string, string> | undefined {
+    if (!h) return h;
+    try { return scrubDeep(h, this.scrubOptions); } catch { return h; }
   }
 
   capture(ev: HttpRequestEvent): void {
@@ -137,11 +159,11 @@ export class HttpRequestModule {
       durationMs: Math.max(0, Math.floor(ev.durationMs)),
       requestSize: ev.requestSize,
       responseSize: ev.responseSize,
-      requestBody: ev.requestBody,
-      responseBody: ev.responseBody,
-      requestHeaders: ev.requestHeaders,
-      responseHeaders: ev.responseHeaders,
-      error: ev.error,
+      requestBody: this.scrub(ev.requestBody),
+      responseBody: this.scrub(ev.responseBody),
+      requestHeaders: this.scrubHeaders(ev.requestHeaders),
+      responseHeaders: this.scrubHeaders(ev.responseHeaders),
+      error: this.scrub(ev.error),
       environment: this.defaults.environment,
       release: this.defaults.release,
       dist: this.defaults.dist,

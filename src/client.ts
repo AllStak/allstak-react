@@ -24,6 +24,7 @@ import { startWebVitals, WebVitalsHandle } from './web-vitals';
 import { resolveRelease } from './release-detect';
 import { SessionTracker } from './session';
 import { OfflineStore, type OfflineStorage } from './offline-store';
+import { scrubEventValues, scrubDeep, scrubString, type ValueScrubOptions } from './pii-scrub';
 import {
   blobToBase64,
   capturePrivacySafeScreenshot,
@@ -121,6 +122,26 @@ export interface AllStakConfig {
   offlineStorage?: OfflineStorage | null;
   /** localStorage key for the offline queue. Default `allstak.offline.v1`. */
   offlineQueueKey?: string;
+  /**
+   * Opt into sending personally-identifiable free-text values. Default
+   * `false` (Sentry parity). This ONLY governs the value-pattern scrubbers
+   * that strip PII from free-text values (error messages, breadcrumbs,
+   * extras, logs, captured HTTP fields):
+   *
+   *   - When `false` (default): email addresses and IPv4/IPv6 literals found
+   *     in free-text values are replaced with `[REDACTED]`, and any
+   *     auto-collected client IP is dropped.
+   *   - When `true`: those email/IP value scrubbers are disabled (the host
+   *     has explicitly opted into PII) and an auto-collected client IP is
+   *     allowed.
+   *
+   * Credit-card numbers (Luhn-valid) and US SSNs are ALWAYS scrubbed
+   * regardless of this flag. The explicit `user` object set via `setUser`
+   * (id / email) is NEVER scrubbed by this flag — explicitly-provided user
+   * identification ships as before. Key-name based secret redaction
+   * (password / token / cookie / api_key …) is unaffected and always on.
+   */
+  sendDefaultPii?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -547,6 +568,7 @@ export class AllStakClient {
     if (config.enableHttpTracking) {
       try {
         this.httpRequests = new HttpRequestModule(this.transport);
+        this.httpRequests.setValueScrubOptions(this.valueScrubOptions());
         this.httpRequests.setDefaults({
           environment: this.config.environment,
           release: this.config.release,
@@ -953,17 +975,27 @@ export class AllStakClient {
   }
 
   private sendLog(level: string, message: string, attributes?: Record<string, unknown>): void {
+    const opts = this.valueScrubOptions();
+    // Scrub the free-text log message + user-supplied attributes only. The
+    // release/sdk/session identity fields below are not free text and are not
+    // scanned. Fail-open: scrubbers never throw, but guard the whole build.
+    let scrubbedMessage = message;
+    let scrubbedAttributes = attributes;
+    try {
+      scrubbedMessage = scrubString(message, opts);
+      scrubbedAttributes = attributes ? scrubDeep(attributes, opts) : attributes;
+    } catch { /* fall back to unscrubbed — never drop the log */ }
     this.transport.send(LOGS_PATH, {
       timestamp: new Date().toISOString(),
       level,
-      message,
+      message: scrubbedMessage,
       sessionId: this.sessionId,
       environment: this.config.environment,
       release: this.config.release,
       platform: this.config.platform,
       sdkName: this.config.sdkName,
       sdkVersion: this.config.sdkVersion,
-      metadata: { ...this.releaseTags(), ...this.config.tags, ...(attributes ?? {}) },
+      metadata: { ...this.releaseTags(), ...this.config.tags, ...(scrubbedAttributes ?? {}) },
     });
   }
 
@@ -972,6 +1004,15 @@ export class AllStakClient {
     if (typeof r !== 'number' || r >= 1) return true;
     if (r <= 0) return false;
     return Math.random() < r;
+  }
+
+  /**
+   * Options for the value-pattern PII scrubbers. `sendDefaultPii` defaults to
+   * `false` (Sentry parity): email + IP value scrubbing on, CC + SSN always
+   * on. When `true`, only the email/IP value scrubbers are disabled.
+   */
+  private valueScrubOptions(): ValueScrubOptions {
+    return { sendDefaultPii: this.config.sendDefaultPii === true };
   }
 
   /**
@@ -1079,6 +1120,11 @@ export class AllStakClient {
 
   private async applyBeforeSend(payload: ErrorIngestPayload): Promise<ErrorIngestPayload | null | undefined> {
     let final: ErrorIngestPayload | null | undefined = payload;
+    // Built-in value-pattern PII scrubber runs FIRST on the wire path so that
+    // user-supplied processors + beforeSend see already-scrubbed free text.
+    // Fail-open: scrubEventValues never throws, but guard anyway.
+    try { final = scrubEventValues(payload, this.valueScrubOptions()); }
+    catch { final = payload; }
     for (const processor of [...(this.config.eventProcessors ?? []), ...this.eventProcessors]) {
       if (!final) return null;
       try { final = await processor(final); }
