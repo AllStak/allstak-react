@@ -64,7 +64,7 @@ test('SessionTracker.start posts /ingest/v1/sessions/start with the reused sessi
     environment: 'production',
     getUserId: () => 'user-42',
     sdkName: 'allstak-react',
-    sdkVersion: '0.3.10',
+    sdkVersion: '0.4.0',
     platform: 'browser',
   }, SESSION_ID);
 
@@ -78,16 +78,16 @@ test('SessionTracker.start posts /ingest/v1/sessions/start with the reused sessi
   assert.equal(payload.environment, 'production');
   assert.equal(payload.userId, 'user-42');
   assert.equal(payload.sdkName, 'allstak-react');
-  assert.equal(payload.sdkVersion, '0.3.10');
+  assert.equal(payload.sdkVersion, '0.4.0');
   assert.equal(payload.platform, 'browser');
 });
 
 test('SessionTracker.start falls back to sdkVersion when no release is set', () => {
   const tx = makeTransport();
-  const tracker = new SessionTracker(tx, { sdkVersion: '0.3.10', platform: 'browser' }, SESSION_ID);
+  const tracker = new SessionTracker(tx, { sdkVersion: '0.4.0', platform: 'browser' }, SESSION_ID);
   tracker.start();
   assert.equal(tx.calls.length, 1);
-  assert.equal(tx.calls[0].payload.release, '0.3.10');
+  assert.equal(tx.calls[0].payload.release, '0.4.0');
 });
 
 test('SessionTracker.start is idempotent — a second start is a no-op', () => {
