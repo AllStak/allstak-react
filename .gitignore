@@ -5,3 +5,6 @@ dist/
 .venv/
 vendor/
 .DS_Store
+
+# npm pack output / publish artifacts
+*.tgz

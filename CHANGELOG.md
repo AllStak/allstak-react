@@ -5,6 +5,70 @@ All notable changes to `@allstak/react` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Publish status: npm `latest` is still **0.3.8**. Versions **0.3.9** and
+> **0.3.10** were tagged but their publishes never reached the registry
+> (sigstore transparency-log / OIDC failures), so the registry has no 0.3.7,
+> 0.3.9, or 0.3.10. The features below are committed on top of the `v0.3.10`
+> tag and are unreleased. The next successful publish should ship at a single
+> clean version chosen at the release gate.
+
+### Added
+
+- **Release-health session tracking** (`SessionTracker`). One session per
+  app-launch: posts `/ingest/v1/sessions/start` on init and
+  `/ingest/v1/sessions/end` on shutdown with a terminal status
+  (`ok` / `errored` / `crashed` / `abnormal`) and total duration, enabling
+  crash-free session/user metrics. Handled errors escalate the session to
+  `errored` and unhandled/fatal errors to `crashed` in-memory, so per-error
+  latency is unaffected (only the terminal end POST does extra I/O). Reuses the
+  SDK session id, never sampled, fully fail-open. `SessionTracker`,
+  `SessionStatus`, and `SessionContext` are exported.
+- **Offline / persistent transport queue** (`OfflineStore`). Telemetry that
+  cannot be delivered (offline, retries exhausted, circuit open at shutdown) is
+  persisted — already PII-scrubbed — and drained through the normal
+  retry/backoff/circuit pipeline on the next init, so events survive a process
+  restart *and* a network outage. Defaults to `localStorage` with a pluggable
+  `OfflineStorage` backend (RN/test injection), bounded by count (50), bytes
+  (~1 MB), and age (48h), oldest-dropped-first. Silent no-op when no storage is
+  available (SSR / sandboxed iframe / private mode). On by default in the
+  browser. `OfflineStore`, `defaultOfflineStorage`, `OfflineStorage`,
+  `PersistedEvent`, and `OfflineStoreOptions` are exported.
+- **Value-pattern PII scrubbing + `sendDefaultPii`**. Adds value-pattern
+  scrubbing on top of the existing key-name redaction: credit-card numbers
+  (13–19 digits, Luhn-validated to avoid corrupting order ids) and US SSNs are
+  **always** redacted; email addresses and IP addresses are redacted unless the
+  new `sendDefaultPii` config flag is `true` (default `false` = Sentry parity).
+  Depth- and length-capped, compiled once, fail-open. `scrubString`,
+  `scrubDeep`, `scrubEventValues`, `makeValueScrubberProcessor`,
+  `ValueScrubOptions`, and `ScrubbablePayload` are exported.
+- **Release auto-detection**. Resolves `release` in priority order: explicit
+  `config.release` → build-time env vars (`ALLSTAK_RELEASE`, `VERCEL_GIT_*`, …)
+  → SDK-version fallback (never empty). Local-git detection is an intentional
+  documented no-op in the browser. Runtime releases are auto-registered.
+  `parseGitRelease`, `resolveRelease`, `releaseFromEnv`, `isNodeRuntime`, and
+  the `GitRunner` type are exported.
+
+### Changed
+
+- **Core Web Vitals shipped as a `web.vital` span.** CLS, LCP, INP, FCP, and
+  TTFB are now emitted once on page-hide as a single `web.vital` span carrying
+  an uppercase-keyed `measurements` map (the wire shape the backend's web-vitals
+  dashboard reads), with double-send guarded across the
+  `visibilitychange` + `pagehide` paths.
+
+### Fixed
+
+- **Transport honours the real `Retry-After` header.** A `Retry-After` returned
+  on `429` / `503` responses now drives the retry / circuit-breaker open
+  duration instead of the locally computed exponential backoff.
+
+## [0.3.10] — 2026-05-22 (tagged, unpublished)
+
+Production-release prep on top of 0.3.9. Tag `v0.3.10` exists but the publish
+never reached npm (registry `latest` remained 0.3.8).
+
 ## [0.3.9] — 2026-05-20
 
 - Added performance trace sampling metadata, propagation headers, web vitals spans, page-load spans, HTTP spans, long-task spans, and sampled profile chunks.
