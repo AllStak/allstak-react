@@ -61,6 +61,13 @@ export interface AllStakProviderProps {
   autoBreadcrumbsFetch?: boolean;
   /** Default true. Wrap console for breadcrumbs (per-method via captureConsole). */
   autoBreadcrumbsConsole?: boolean;
+  /**
+   * Default true. Capture privacy-safe UI click breadcrumbs using selector
+   * summaries only; input values and full text are never captured.
+   */
+  autoBreadcrumbsClick?: boolean;
+  beforeBreadcrumb?: AllStakConfig['beforeBreadcrumb'];
+  clickBreadcrumbMaxSelectorLength?: AllStakConfig['clickBreadcrumbMaxSelectorLength'];
   /** Default true. Patch history.pushState/replaceState + popstate listener. */
   autoBreadcrumbsNavigation?: boolean;
   /** Default true. Collect Web Vitals via PerformanceObserver. */
@@ -178,6 +185,9 @@ export function AllStakProvider({
   autoCaptureBrowserErrors,
   autoBreadcrumbsFetch,
   autoBreadcrumbsConsole,
+  autoBreadcrumbsClick,
+  beforeBreadcrumb,
+  clickBreadcrumbMaxSelectorLength,
   autoBreadcrumbsNavigation,
   autoWebVitals,
   destroyOnUnmount = false,
@@ -231,6 +241,9 @@ export function AllStakProvider({
         autoCaptureBrowserErrors,
         autoBreadcrumbsFetch,
         autoBreadcrumbsConsole,
+        autoBreadcrumbsClick,
+        beforeBreadcrumb,
+        clickBreadcrumbMaxSelectorLength,
         autoBreadcrumbsNavigation,
         autoWebVitals,
       };

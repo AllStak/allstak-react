@@ -11,6 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { gunzipSync } from 'node:zlib';
 
 const sent = [];
 let failNextN = 0;
@@ -34,6 +35,14 @@ globalThis.window = {
   },
   removeEventListener: (t, h) => winListeners.get(t)?.delete(h),
 };
+const docListeners = new Map();
+globalThis.document = {
+  addEventListener: (t, h) => {
+    if (!docListeners.has(t)) docListeners.set(t, new Set());
+    docListeners.get(t).add(h);
+  },
+  removeEventListener: (t, h) => docListeners.get(t)?.delete(h),
+};
 const histState = { stack: [{ url: '/start' }] };
 globalThis.history = {
   pushState: (_state, _u, url) => { histState.stack.push({ url }); globalThis.location.pathname = String(url); },
@@ -49,6 +58,7 @@ const {
   instrumentBrowserNavigation,
   instrumentFetch,
   instrumentConsole,
+  __resetClickInstrumentationFlagForTest,
 } = await import('../dist/index.mjs');
 
 // Distributed tracing is default-on, so `init` now also ships `http.client`
@@ -60,8 +70,39 @@ const isErrorReq = (s) => /\/ingest\/v1\/errors$/.test(s.url);
 const errorBody = () => {
   const req = [...sent].reverse().find(isErrorReq);
   assert.ok(req, 'an /ingest/v1/errors request must have been sent');
-  return JSON.parse(req.init.body);
+  return JSON.parse(requestBodyText(req));
 };
+const waitForSend = () => new Promise((r) => setTimeout(r, 50));
+const resetClicks = () => {
+  docListeners.clear();
+  __resetClickInstrumentationFlagForTest();
+};
+const element = (tagName, attrs = {}, parentElement = null) => ({
+  tagName,
+  nodeType: 1,
+  parentElement,
+  classList: typeof attrs.class === 'string' ? attrs.class.split(/\s+/).filter(Boolean) : [],
+  getAttribute(name) {
+    if (Object.prototype.hasOwnProperty.call(attrs, name)) return String(attrs[name]);
+    return null;
+  },
+});
+const click = (target) => {
+  for (const h of (docListeners.get('click') ?? [])) h({ target });
+};
+
+function requestBodyText(req) {
+  const encoding = new Headers(req.init.headers).get('Content-Encoding');
+  if (encoding === 'gzip') return gunzipSync(bodyBuffer(req.init.body)).toString('utf8');
+  return String(req.init.body);
+}
+
+function bodyBuffer(body) {
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (body instanceof ArrayBuffer) return Buffer.from(body);
+  if (typeof body === 'string') return Buffer.from(body);
+  throw new Error(`Unsupported body type: ${Object.prototype.toString.call(body)}`);
+}
 
 // ───────────────────────────────────────────────────────────────
 // setLevel + setFingerprint
@@ -72,7 +113,7 @@ test('setLevel changes payload.level', async () => {
   AllStak.init({ apiKey: 'k', autoCaptureBrowserErrors: false, autoBreadcrumbsFetch: false, autoBreadcrumbsConsole: false, autoBreadcrumbsNavigation: false });
   AllStak.setLevel('warning');
   AllStak.captureException(new Error('warn-me'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   assert.equal(errorBody().level, 'warning');
 });
 
@@ -81,13 +122,13 @@ test('setFingerprint propagates; setFingerprint(null) clears it', async () => {
   AllStak.init({ apiKey: 'k', autoCaptureBrowserErrors: false, autoBreadcrumbsFetch: false, autoBreadcrumbsConsole: false, autoBreadcrumbsNavigation: false });
   AllStak.setFingerprint(['feat-a', 'v2']);
   AllStak.captureException(new Error('group-me'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   assert.deepEqual(errorBody().fingerprint, ['feat-a', 'v2']);
 
   sent.length = 0;
   AllStak.setFingerprint(null);
   AllStak.captureException(new Error('cleared'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   assert.equal(errorBody().fingerprint, undefined);
 });
 
@@ -97,7 +138,7 @@ test('error.name override survives as exceptionClass', async () => {
   const err = new Error('renamed');
   err.name = 'CustomDomainError';
   AllStak.captureException(err);
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   assert.equal(errorBody().exceptionClass, 'CustomDomainError');
 });
 
@@ -119,7 +160,7 @@ test('init wraps fetch — successful request adds an http breadcrumb', async ()
   assert.equal(res.status, 200);
 
   AllStak.captureException(new Error('after-fetch'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   const body = errorBody();
   const httpCrumb = body.breadcrumbs?.find((c) => c.type === 'http');
   assert.ok(httpCrumb, 'an http breadcrumb must be recorded');
@@ -139,7 +180,7 @@ test('instrumentFetch records breadcrumb + rethrows on network failure', async (
   await assert.rejects(() => fetch('https://example.com/will-fail'), /network/);
 
   AllStak.captureException(new Error('after-failed-fetch'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   const body = errorBody();
   const failCrumb = body.breadcrumbs.find((c) => c.type === 'http' && /failed$/.test(c.message));
   assert.ok(failCrumb);
@@ -152,7 +193,7 @@ test('instrumentFetch is idempotent — second init does not double-wrap', async
   AllStak.init({ apiKey: 'k', autoCaptureBrowserErrors: false, autoBreadcrumbsFetch: true, autoBreadcrumbsConsole: false, autoBreadcrumbsNavigation: false });
   await fetch('https://example.com/once');
   AllStak.captureException(new Error('after'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   const body = errorBody();
   const httpCrumbs = body.breadcrumbs.filter((c) => c.type === 'http' && /example\.com/.test(c.message));
   assert.equal(httpCrumbs.length, 1, 'fetch wrap must not double-fire');
@@ -187,7 +228,7 @@ test('instrumentConsole wraps warn/error + forwards to originals', async () => {
   console.error = origError;
 
   AllStak.captureException(new Error('after-logs'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   const body = errorBody();
   const logCrumbs = body.breadcrumbs.filter((c) => c.type === 'log');
   assert.equal(logCrumbs.length, 2);
@@ -217,9 +258,110 @@ test('pushState / popstate emit navigation breadcrumbs', async () => {
   for (const h of (winListeners.get('popstate') ?? [])) h({});
 
   AllStak.captureException(new Error('after-nav'));
-  await new Promise((r) => setTimeout(r, 50));
+  await waitForSend();
   const body = errorBody();
   const navCrumbs = body.breadcrumbs.filter((c) => c.type === 'navigation');
   // At least the two pushState transitions + the popstate
   assert.ok(navCrumbs.length >= 2, `expected at least 2 nav breadcrumbs, got ${navCrumbs.length}`);
+});
+
+// ───────────────────────────────────────────────────────────────
+// privacy-safe click breadcrumbs
+// ───────────────────────────────────────────────────────────────
+
+test('privacy-safe click breadcrumbs capture selector summaries only', async () => {
+  sent.length = 0;
+  resetClicks();
+  AllStak.init({
+    apiKey: 'k',
+    autoCaptureBrowserErrors: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsConsole: false,
+    autoBreadcrumbsClick: true,
+    autoBreadcrumbsNavigation: false,
+  });
+
+  const button = element('BUTTON', {
+    id: 'pay-now',
+    class: 'primary checkout',
+    value: '4111111111111111',
+    'data-secret': 'bearer super-secret-token',
+  });
+  click(button);
+  AllStak.captureException(new Error('after-click'));
+  await waitForSend();
+
+  const body = errorBody();
+  const uiCrumb = body.breadcrumbs.find((c) => c.type === 'ui');
+  assert.ok(uiCrumb, 'a ui click breadcrumb must be recorded');
+  assert.equal(uiCrumb.message, 'click button#pay-now.primary.checkout');
+  assert.equal(uiCrumb.data.selector, 'button#pay-now.primary.checkout');
+  assert.equal(uiCrumb.data.tag, 'button');
+  const serialized = JSON.stringify(body);
+  assert.doesNotMatch(serialized, /4111111111111111/);
+  assert.doesNotMatch(serialized, /super-secret-token/);
+});
+
+test('password input clicks are ignored', async () => {
+  sent.length = 0;
+  resetClicks();
+  AllStak.init({
+    apiKey: 'k',
+    autoCaptureBrowserErrors: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsConsole: false,
+    autoBreadcrumbsClick: true,
+    autoBreadcrumbsNavigation: false,
+  });
+
+  click(element('INPUT', { type: 'password', id: 'account-password' }));
+  AllStak.captureException(new Error('after-password-click'));
+  await waitForSend();
+  const body = errorBody();
+  assert.equal(body.breadcrumbs, undefined);
+});
+
+test('beforeBreadcrumb can drop click breadcrumbs', async () => {
+  sent.length = 0;
+  resetClicks();
+  AllStak.init({
+    apiKey: 'k',
+    autoCaptureBrowserErrors: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsConsole: false,
+    autoBreadcrumbsClick: true,
+    autoBreadcrumbsNavigation: false,
+    beforeBreadcrumb: () => null,
+  });
+
+  click(element('A', { id: 'download', href: '/private?token=secret' }));
+  AllStak.captureException(new Error('after-dropped-click'));
+  await waitForSend();
+  const body = errorBody();
+  assert.equal(body.breadcrumbs, undefined);
+});
+
+test('long click selectors are truncated', async () => {
+  sent.length = 0;
+  resetClicks();
+  AllStak.init({
+    apiKey: 'k',
+    autoCaptureBrowserErrors: false,
+    autoBreadcrumbsFetch: false,
+    autoBreadcrumbsConsole: false,
+    autoBreadcrumbsClick: true,
+    clickBreadcrumbMaxSelectorLength: 48,
+    autoBreadcrumbsNavigation: false,
+  });
+
+  click(element('BUTTON', {
+    id: 'payment-button-with-a-very-long-generated-identifier',
+    class: 'primary checkout elevated enterprise billing',
+  }));
+  AllStak.captureException(new Error('after-long-click'));
+  await waitForSend();
+  const body = errorBody();
+  const uiCrumb = body.breadcrumbs.find((c) => c.type === 'ui');
+  assert.ok(uiCrumb.message.length <= 'click '.length + 48);
+  assert.match(uiCrumb.message, /\[truncated]$/);
 });

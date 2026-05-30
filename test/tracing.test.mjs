@@ -84,10 +84,44 @@ test('getTraceId is stable; setTraceId overrides; resetTrace clears', async () =
   const t2 = AllStak.getTraceId();
   assert.equal(t1, t2, 'getTraceId must be stable across calls');
   AllStak.setTraceId('00000000-0000-4000-8000-000000000000');
-  assert.equal(AllStak.getTraceId(), '00000000-0000-4000-8000-000000000000');
+  assert.equal(AllStak.getTraceId(), '00000000000040008000000000000000');
   AllStak.resetTrace();
   const t3 = AllStak.getTraceId();
-  assert.notEqual(t3, '00000000-0000-4000-8000-000000000000', 'resetTrace must drop the override');
+  assert.notEqual(t3, '00000000000040008000000000000000', 'resetTrace must drop the override');
+});
+
+test('continueTrace parents the next root span to a valid inbound W3C parent', async () => {
+  sent.length = 0;
+  AllStak.init({ apiKey: 'k', release: 'r' });
+  const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+  const parentSpanId = '7a3ce929d0e0e473';
+  assert.equal(AllStak.continueTrace(traceId, parentSpanId, true), true);
+  const root = AllStak.startSpan('http.server');
+  const child = AllStak.startSpan('db.sqlite.query');
+  child.finish();
+  root.finish('error');
+  AllStak.destroy();
+  await wait(20);
+  const spans = spansFromBody(sent.find(spanPath).init.body);
+  const rootSpan = spans.find((s) => s.operation === 'http.server');
+  const childSpan = spans.find((s) => s.operation === 'db.sqlite.query');
+  assert.equal(rootSpan.traceId, traceId);
+  assert.equal(rootSpan.parentSpanId, parentSpanId);
+  assert.equal(childSpan.parentSpanId, rootSpan.spanId);
+});
+
+test('continueTrace safely ignores invalid inbound W3C context', async () => {
+  sent.length = 0;
+  AllStak.init({ apiKey: 'k', release: 'r' });
+  assert.equal(AllStak.continueTrace('not-a-trace', 'not-a-span'), false);
+  const span = AllStak.startSpan('fresh-root');
+  span.finish();
+  AllStak.destroy();
+  await wait(20);
+  const spans = spansFromBody(sent.find(spanPath).init.body);
+  assert.match(spans[0].traceId, /^[0-9a-f]{32}$/);
+  assert.match(spans[0].spanId, /^[0-9a-f]{16}$/);
+  assert.equal(spans[0].parentSpanId, '');
 });
 
 test('captureException auto-attaches traceId and spanId to the error payload', async () => {

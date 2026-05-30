@@ -137,6 +137,23 @@ test('flush() resolves true when buffer is empty', async () => {
   assert.equal(ok, true);
 });
 
+test('flush() waits for pending async error pipeline work before reporting drained', async () => {
+  sent.length = 0;
+  AllStak.init({
+    apiKey: 'k',
+    beforeSend: async (ev) => {
+      await new Promise((r) => setTimeout(r, 50));
+      return { ...ev, message: `flushed:${ev.message}` };
+    },
+  });
+  AllStak.captureException(new Error('pipeline'));
+
+  const ok = await AllStak.flush(500);
+  assert.equal(ok, true);
+  const body = JSON.parse(sent.find((entry) => String(entry.url).endsWith('/ingest/v1/errors')).init.body);
+  assert.equal(body.message, 'flushed:pipeline');
+});
+
 test('logger API posts structured logs without creating error events', async () => {
   sent.length = 0;
   AllStak.init({ apiKey: 'k' });

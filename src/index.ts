@@ -50,8 +50,14 @@ export type { ScreenshotCapture, ScreenshotCaptureOptions, ScreenshotRedactionMo
 export { instrumentBrowserNavigation, instrumentReactRouter, instrumentNextRouter } from './navigation';
 
 // ── Auto-breadcrumb helpers ─────────────────────────────────────
-export { instrumentFetch, instrumentConsole, __resetConsoleInstrumentationFlagForTest } from './auto-breadcrumbs';
-export type { ConsoleCaptureOptions } from './auto-breadcrumbs';
+export {
+  instrumentFetch,
+  instrumentConsole,
+  instrumentClicks,
+  __resetConsoleInstrumentationFlagForTest,
+  __resetClickInstrumentationFlagForTest,
+} from './auto-breadcrumbs';
+export type { BeforeBreadcrumb, ClickBreadcrumbOptions, ConsoleCaptureOptions } from './auto-breadcrumbs';
 
 // ── Web Vitals ──────────────────────────────────────────────────
 export { startWebVitals, __resetWebVitalsFlagForTest } from './web-vitals';
@@ -124,6 +130,7 @@ export const getCurrentScope = AllStak.getCurrentScope;
 export const configureScope = AllStak.configureScope;
 export const getTraceId = AllStak.getTraceId;
 export const setTraceId = AllStak.setTraceId;
+export const continueTrace = AllStak.continueTrace;
 export const getCurrentSpanId = AllStak.getCurrentSpanId;
 export const resetTrace = AllStak.resetTrace;
 export const instrumentAxios = AllStak.instrumentAxios;

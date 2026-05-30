@@ -10,7 +10,7 @@
 
 import { HttpTransport, type TransportStats } from './transport';
 import { parseStack } from './stack';
-import { instrumentFetch, instrumentConsole } from './auto-breadcrumbs';
+import { instrumentFetch, instrumentConsole, instrumentClicks } from './auto-breadcrumbs';
 import { instrumentBrowserNavigation, __setDefaultBreadcrumbForwarder } from './navigation';
 import { Scope, mergeScopes } from './scope';
 import { TracingModule, Span, type SpanData, type SpanOptions } from './tracing';
@@ -19,7 +19,7 @@ import { resolveDebugId } from './debug-id';
 import { HttpRequestModule } from './http-requests';
 import type { HttpTrackingOptions } from './http-redact';
 import { installHttpInstrumentation } from './http-instrumentation';
-import type { ConsoleCaptureOptions } from './auto-breadcrumbs';
+import type { BeforeBreadcrumb, ConsoleCaptureOptions } from './auto-breadcrumbs';
 import { startWebVitals, WebVitalsHandle } from './web-vitals';
 import { resolveRelease } from './release-detect';
 import { SessionTracker } from './session';
@@ -211,6 +211,16 @@ export interface AllStakConfig {
    * Per-method capture is controlled by `captureConsole` (warn + error
    * default on, log + info default off). */
   autoBreadcrumbsConsole?: boolean;
+  /**
+   * Capture privacy-safe UI click breadcrumbs. Default: true. The SDK records
+   * only a bounded selector summary (tag/id/classes/role/type), never input
+   * values or full text.
+   */
+  autoBreadcrumbsClick?: boolean;
+  /** Mutate/drop auto-captured breadcrumbs before they are stored. */
+  beforeBreadcrumb?: BeforeBreadcrumb;
+  /** Maximum selector length for click breadcrumbs. Default: 160, minimum: 32. */
+  clickBreadcrumbMaxSelectorLength?: number;
   /**
    * Per-console-method capture flags. Defaults: warn + error captured,
    * log + info NOT captured (to avoid breadcrumb spam from typical app
@@ -492,6 +502,7 @@ export class AllStakClient {
   private webVitals: WebVitalsHandle | null = null;
   private profileTimer: ReturnType<typeof setInterval> | null = null;
   private eventProcessors: ErrorEventProcessor[] = [];
+  private pendingErrorPipelines = new Set<Promise<void>>();
   private lastEventKey: string | null = null;
   private sessionTracker: SessionTracker | null = null;
   private offlineStore: OfflineStore | null = null;
@@ -572,6 +583,14 @@ export class AllStakClient {
     if (config.autoBreadcrumbsConsole !== false) {
       try { instrumentConsole(safeAddBreadcrumb, config.captureConsole); }
       catch { /* ignore */ }
+    }
+    if (config.autoBreadcrumbsClick !== false) {
+      try {
+        instrumentClicks(safeAddBreadcrumb, {
+          beforeBreadcrumb: config.beforeBreadcrumb,
+          maxSelectorLength: config.clickBreadcrumbMaxSelectorLength,
+        });
+      } catch { /* ignore */ }
     }
     if (config.autoBreadcrumbsNavigation !== false) {
       try { instrumentBrowserNavigation(safeAddBreadcrumb); }
@@ -759,7 +778,7 @@ export class AllStakClient {
       fingerprint: eff.fingerprint,
     };
     this.recordSessionStatusForEvent(payload, context);
-    void this.sendErrorThroughBeforeSend(payload);
+    this.enqueueErrorPipeline(payload, true);
   }
 
   /**
@@ -832,6 +851,10 @@ export class AllStakClient {
   getTraceId(): string { return this.tracing.getTraceId(); }
   /** Override the active trace ID, e.g. from an inbound request header. */
   setTraceId(traceId: string): void { this.tracing.setTraceId(traceId); }
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    return this.tracing.continueTrace(traceId, parentSpanId, sampled);
+  }
   /** ID of the currently-active span, or null. */
   getCurrentSpanId(): string | null { return this.tracing.getCurrentSpanId(); }
   /** Reset the trace ID and the active span stack. */
@@ -866,7 +889,7 @@ export class AllStakClient {
         requestContext: browserRequestContext(),
         fingerprint: eff.fingerprint,
       };
-      this.sendThroughBeforeSend(payload);
+      this.enqueueErrorPipeline(payload);
     }
   }
 
@@ -926,11 +949,14 @@ export class AllStakClient {
    * Resolves `true` if telemetry drains within `timeoutMs` (default 2000ms),
    * `false` otherwise.
    */
-  flush(timeoutMs?: number): Promise<boolean> {
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
     this.httpRequests?.flush();
     this.tracing.flush();
     this.replay?.flush();
-    return this.transport.flush(timeoutMs);
+    const errorsReady = await this.flushErrorPipelines(Math.max(0, deadline - Date.now()));
+    if (!errorsReady) return false;
+    return this.transport.flush(Math.max(0, deadline - Date.now()));
   }
 
   /** Set the default severity level applied to subsequent captures. */
@@ -1219,6 +1245,28 @@ export class AllStakClient {
     if (this.shouldCaptureScreenshot(final)) {
       void this.captureAndUploadScreenshot(final).catch(() => undefined);
     }
+  }
+
+  private enqueueErrorPipeline(payload: ErrorIngestPayload, withScreenshot = false): void {
+    const pending = (withScreenshot
+      ? this.sendErrorThroughBeforeSend(payload)
+      : this.sendThroughBeforeSend(payload)
+    ).catch(() => undefined);
+    this.pendingErrorPipelines.add(pending);
+    pending.finally(() => this.pendingErrorPipelines.delete(pending)).catch(() => undefined);
+  }
+
+  private async flushErrorPipelines(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pendingErrorPipelines.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await Promise.race([
+        Promise.allSettled(Array.from(this.pendingErrorPipelines)),
+        new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining))),
+      ]);
+    }
+    return true;
   }
 
   private async applyBeforeSend(payload: ErrorIngestPayload): Promise<ErrorIngestPayload | null | undefined> {
@@ -1623,6 +1671,9 @@ export const AllStak = {
   },
   getTraceId(): string { return ensureInit().getTraceId(); },
   setTraceId(traceId: string): void { ensureInit().setTraceId(traceId); },
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    return ensureInit().continueTrace(traceId, parentSpanId, sampled);
+  },
   getCurrentSpanId(): string | null { return ensureInit().getCurrentSpanId(); },
   resetTrace(): void { ensureInit().resetTrace(); },
   /** Manually instrument an axios instance. No-op when HTTP tracking is off. */

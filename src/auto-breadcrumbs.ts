@@ -1,5 +1,6 @@
 /**
- * Idempotent instrumentation of `globalThis.fetch` and `console.warn/error`
+ * Idempotent instrumentation of `globalThis.fetch`, `console.warn/error`,
+ * and safe browser click breadcrumbs
  * to feed breadcrumbs into the AllStak client. Safe to call once at init.
  *
  * - `instrumentFetch`: wraps fetch and records a breadcrumb per request
@@ -21,8 +22,18 @@ type AddBreadcrumbFn = (
   data?: Record<string, unknown>,
 ) => void;
 
+export interface AutoBreadcrumb {
+  type: string;
+  message: string;
+  level?: string;
+  data?: Record<string, unknown>;
+}
+
+export type BeforeBreadcrumb = (breadcrumb: AutoBreadcrumb) => AutoBreadcrumb | null | undefined;
+
 const FETCH_FLAG = '__allstak_fetch_patched__';
 const CONSOLE_FLAG = '__allstak_console_patched__';
+const CLICK_FLAG = '__allstak_click_patched__';
 
 // The HTTP-tracking module (src/http-instrumentation.ts) also wraps
 // `globalThis.fetch`, tagging its wrapper with this flag. Both wrappers are
@@ -160,11 +171,138 @@ export function instrumentConsole(
   (console as any)[CONSOLE_FLAG] = true;
 }
 
+export interface ClickBreadcrumbOptions {
+  beforeBreadcrumb?: BeforeBreadcrumb;
+  maxSelectorLength?: number;
+}
+
+export function instrumentClicks(
+  addBreadcrumb: AddBreadcrumbFn,
+  options: ClickBreadcrumbOptions = {},
+): void {
+  const doc = (globalThis as any).document;
+  if (!doc || typeof doc.addEventListener !== 'function') return;
+  if ((doc as any)[CLICK_FLAG]) return;
+
+  const maxSelectorLength = Math.max(32, options.maxSelectorLength ?? 160);
+  const handler = (event: Event) => {
+    try {
+      const target = closestClickable((event as any).target);
+      if (!target || isSensitiveClickable(target)) return;
+      const selector = selectorSummary(target, maxSelectorLength);
+      if (!selector) return;
+      const crumb: AutoBreadcrumb = {
+        type: 'ui',
+        message: `click ${selector}`,
+        level: 'info',
+        data: { action: 'click', selector, tag: tagName(target) },
+      };
+      const finalCrumb = options.beforeBreadcrumb ? options.beforeBreadcrumb(crumb) : crumb;
+      if (!finalCrumb) return;
+      addBreadcrumb(finalCrumb.type, finalCrumb.message, finalCrumb.level, finalCrumb.data);
+    } catch {
+      /* never break host */
+    }
+  };
+
+  doc.addEventListener('click', handler, true);
+  (doc as any)[CLICK_FLAG] = true;
+}
+
+function closestClickable(target: unknown): Element | null {
+  let el = asElement(target);
+  while (el) {
+    const tag = tagName(el);
+    if (
+      tag === 'button' ||
+      tag === 'a' ||
+      tag === 'input' ||
+      tag === 'select' ||
+      tag === 'textarea' ||
+      attr(el, 'role') === 'button' ||
+      attr(el, 'data-allstak-click') !== null
+    ) {
+      return el;
+    }
+    el = asElement((el as unknown as { parentElement?: unknown }).parentElement);
+  }
+  return asElement(target);
+}
+
+function asElement(value: unknown): Element | null {
+  if (!value || typeof value !== 'object') return null;
+  const maybe = value as { tagName?: unknown; nodeType?: unknown };
+  return typeof maybe.tagName === 'string' || maybe.nodeType === 1 ? value as Element : null;
+}
+
+function isSensitiveClickable(el: Element): boolean {
+  const tag = tagName(el);
+  if (tag !== 'input') return false;
+  const type = (attr(el, 'type') ?? '').toLowerCase();
+  return type === 'password' || type === 'hidden';
+}
+
+function selectorSummary(el: Element, maxLength: number): string {
+  const tag = tagName(el) || 'element';
+  const parts = [tag];
+  const id = cleanSelectorPart(attr(el, 'id'));
+  if (id) parts.push(`#${id}`);
+  const classes = classNames(el).slice(0, 3).map(cleanSelectorPart).filter(Boolean);
+  if (classes.length) parts.push(classes.map((c) => `.${c}`).join(''));
+  const role = cleanSelectorPart(attr(el, 'role'));
+  if (role) parts.push(`[role="${role}"]`);
+  const type = cleanSelectorPart(attr(el, 'type'));
+  if (type && tag === 'input') parts.push(`[type="${type}"]`);
+  return truncateSelector(parts.join(''), maxLength);
+}
+
+function tagName(el: Element): string {
+  return ((el as unknown as { tagName?: string }).tagName ?? '').toLowerCase();
+}
+
+function attr(el: Element, name: string): string | null {
+  try {
+    const getter = (el as unknown as { getAttribute?: (n: string) => string | null }).getAttribute;
+    if (typeof getter === 'function') return getter.call(el, name);
+    const value = (el as unknown as Record<string, unknown>)[name];
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function classNames(el: Element): string[] {
+  try {
+    const list = (el as unknown as { classList?: Iterable<string>; className?: unknown }).classList;
+    if (list) return Array.from(list).filter((v): v is string => typeof v === 'string');
+    const className = (el as unknown as { className?: unknown }).className;
+    return typeof className === 'string' ? className.split(/\s+/).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanSelectorPart(value: string | null): string {
+  if (!value) return '';
+  return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+function truncateSelector(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, Math.max(0, maxLength - 12)) + '[truncated]';
+}
+
 /** @internal — for tests. Resets the wrap-once flag. */
 export function __resetConsoleInstrumentationFlagForTest(): void {
   if (typeof console !== 'undefined') {
     delete (console as any)[CONSOLE_FLAG];
   }
+}
+
+/** @internal - for tests. Resets the click wrap-once flag. */
+export function __resetClickInstrumentationFlagForTest(): void {
+  const doc = (globalThis as any).document;
+  if (doc) delete (doc as any)[CLICK_FLAG];
 }
 
 /**
@@ -206,4 +344,3 @@ function truncate(s: string): string {
   if (s.length <= MAX_ARG_BYTES) return s;
   return s.slice(0, MAX_ARG_BYTES) + '…[truncated]';
 }
-

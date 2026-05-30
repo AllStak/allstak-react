@@ -21,6 +21,7 @@ const FAILURE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 30_000;
 const RETRY_AFTER_MAX_MS = 300_000;
+const COMPRESSION_THRESHOLD_BYTES = 16 * 1024;
 
 /**
  * Paths that are LIVE-only and must never be persisted/replayed. A stale
@@ -89,6 +90,9 @@ export interface TransportStats {
   consecutiveFailures: number;
   circuitOpenUntil: number;
   retryAttempts: number;
+  compressed: number;
+  uncompressed: number;
+  compressionBytesSaved: number;
 }
 
 export interface AttachmentUpload {
@@ -118,6 +122,9 @@ export class HttpTransport {
   private persisted = 0;
   private replayed = 0;
   private retryAttempts = 0;
+  private compressed = 0;
+  private uncompressed = 0;
+  private compressionBytesSaved = 0;
   private pendingRetryDelayMs = 0;
   private closed = false;
 
@@ -248,6 +255,8 @@ export class HttpTransport {
     const url = this.options.tunnel || `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const bodyJson = JSON.stringify(this.options.tunnel ? { path, payload } : payload);
+    const body = await this.prepareRequestBody(bodyJson);
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -255,8 +264,9 @@ export class HttpTransport {
           'Content-Type': 'application/json',
           'X-AllStak-Key': this.apiKey,
           ...(this.options.tunnel ? { 'X-AllStak-Target-Path': path } : {}),
+          ...body.headers,
         },
-        body: JSON.stringify(this.options.tunnel ? { path, payload } : payload),
+        body: body.body,
         signal: controller.signal,
       });
       if (!res.ok) throw new HttpResponseError(res.status, res.headers.get('Retry-After'));
@@ -484,8 +494,57 @@ export class HttpTransport {
       consecutiveFailures: this.consecutiveFailures,
       circuitOpenUntil: this.circuitOpenUntil,
       retryAttempts: this.retryAttempts,
+      compressed: this.compressed,
+      uncompressed: this.uncompressed,
+      compressionBytesSaved: this.compressionBytesSaved,
     };
   }
+
+  private async prepareRequestBody(bodyJson: string): Promise<PreparedBody> {
+    const rawBytes = byteLength(bodyJson);
+    if (rawBytes < COMPRESSION_THRESHOLD_BYTES) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+
+    const compressed = await gzipBody(bodyJson);
+    if (!compressed || compressed.byteLength >= rawBytes) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+
+    this.compressed++;
+    this.compressionBytesSaved += rawBytes - compressed.byteLength;
+    return {
+      body: compressed as unknown as BodyInit,
+      headers: { 'Content-Encoding': 'gzip' },
+    };
+  }
+}
+
+type PreparedBody = {
+  body: BodyInit;
+  headers: Record<string, string>;
+};
+
+async function gzipBody(bodyJson: string): Promise<Uint8Array | null> {
+  const compressionStream = (globalThis as any).CompressionStream;
+  if (typeof compressionStream !== 'function' || typeof Blob === 'undefined' || typeof Response === 'undefined') {
+    return null;
+  }
+  try {
+    const stream = new Blob([bodyJson], { type: 'application/json' })
+      .stream()
+      .pipeThrough(new compressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+function byteLength(value: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).byteLength;
+  return value.length;
 }
 
 function jitteredBackoff(failures: number): number {

@@ -60,12 +60,31 @@ function randomHex(len: number): string {
   return Array.from({ length: len }, () => hex(16)).join('');
 }
 
-function traceId(): string {
-  return randomHex(32);
+const TRACE_ID_RE = /^[0-9a-f]{32}$/;
+const SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const ZERO_TRACE_ID_RE = /^0{32}$/;
+const ZERO_SPAN_ID_RE = /^0{16}$/;
+
+function newTraceId(): string {
+  let id = randomHex(32);
+  while (ZERO_TRACE_ID_RE.test(id)) id = randomHex(32);
+  return id;
 }
 
-function spanId(): string {
-  return randomHex(16);
+function newSpanId(): string {
+  let id = randomHex(16);
+  while (ZERO_SPAN_ID_RE.test(id)) id = randomHex(16);
+  return id;
+}
+
+function normalizeTraceId(value: string | undefined | null): string | null {
+  const candidate = String(value ?? '').replace(/-/g, '').toLowerCase();
+  return TRACE_ID_RE.test(candidate) && !ZERO_TRACE_ID_RE.test(candidate) ? candidate : null;
+}
+
+function normalizeSpanId(value: string | undefined | null): string | null {
+  const candidate = String(value ?? '').replace(/-/g, '').toLowerCase();
+  return SPAN_ID_RE.test(candidate) && !ZERO_SPAN_ID_RE.test(candidate) ? candidate : null;
 }
 
 export class Span {
@@ -167,7 +186,7 @@ export class TracingModule {
   private currentTraceId: string | null = null;
   private currentSampled: boolean | null = null;
   private currentSampleRate = 1;
-  private spanStack: Span[] = [];
+  private spanStack: Array<{ spanId: string }> = [];
   private destroyed = false;
 
   constructor(private transport: HttpTransport, private opts: TracingOptions) {
@@ -178,7 +197,7 @@ export class TracingModule {
   /** Get (and lazily create) the active trace ID. */
   getTraceId(): string {
     if (!this.currentTraceId) {
-      this.currentTraceId = traceId();
+      this.currentTraceId = newTraceId();
       this.ensureSamplingDecision();
     }
     return this.currentTraceId;
@@ -186,8 +205,21 @@ export class TracingModule {
 
   /** Override the active trace ID, e.g. from an inbound request header. */
   setTraceId(traceId: string): void {
-    this.currentTraceId = traceId;
+    this.currentTraceId = normalizeTraceId(traceId) ?? newTraceId();
     this.ensureSamplingDecision();
+  }
+
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    const normalizedTraceId = normalizeTraceId(traceId);
+    if (!normalizedTraceId) return false;
+    const normalizedParentSpanId = parentSpanId ? normalizeSpanId(parentSpanId) : null;
+    if (parentSpanId && !normalizedParentSpanId) return false;
+    this.currentTraceId = normalizedTraceId;
+    this.currentSampled = typeof sampled === 'boolean' ? sampled : null;
+    this.currentSampleRate = sampled === false ? 0 : 1;
+    this.spanStack = normalizedParentSpanId ? [{ spanId: normalizedParentSpanId }] : [];
+    return true;
   }
 
   /** Get the active span's ID, or null if no span is active. */
@@ -210,7 +242,7 @@ export class TracingModule {
    */
   startSpan(operation: string, options: SpanOptions = {}): Span {
     const traceId = this.getTraceId();
-    const spanIdValue = spanId();
+    const spanIdValue = newSpanId();
     const parentSpanId = this.getCurrentSpanId() ?? '';
 
     if (!this.ensureSamplingDecision()) {
