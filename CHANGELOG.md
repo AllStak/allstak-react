@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-04
+
+### Added
+
+- Added Sentry-compatible React exports: `ErrorBoundary`, `withErrorBoundary`,
+  `Profiler`, `withProfiler`, `useProfiler`, `createReduxEnhancer`,
+  `browserTracingIntegration`, `replayIntegration`, feedback integration stub,
+  and React Router v6/v7 tracing wrappers.
+- Added zero-config browser, OS, device, viewport, locale, and timezone context
+  collection, attached to events by default with an opt-out via
+  `autoBrowserContext: false`.
+- Added route-aware pageload and navigation spans, replay route markers,
+  `replayId`, active route, and client capture timestamps on error payloads.
+- Added Sentry-style replay sampling aliases (`replaysSessionSampleRate`,
+  `replaysOnErrorSampleRate`) and critical-flow replay sampling support.
+- Added SDK debug diagnostics for init success and dropped-event reasons.
+
+### Changed
+
+- Session replay now uses a richer DOM serializer with stable node ids, shadow
+  DOM capture, masked form values, stylesheet inlining, and mutation replay
+  support.
+- Browser tracing integrations suppress the core pageload span when they emit a
+  route-named pageload transaction, preventing duplicate pageload telemetry.
+
+### Fixed
+
+- Click breadcrumbs now apply `beforeBreadcrumb` through the centralized
+  breadcrumb pipeline, matching every other breadcrumb source.
+
 ## [0.5.0] — 2026-05-30
 
 ### Changed

@@ -52,6 +52,12 @@ export interface AllStakProviderProps {
   sampleRate?: number;
   beforeSend?: AllStakConfig['beforeSend'];
   replay?: AllStakConfig['replay'];
+  /** Sentry-compatible integrations (browserTracingIntegration(), replayIntegration(), …). */
+  integrations?: AllStakConfig['integrations'];
+  /** Sentry-compatible session-replay sample rate. */
+  replaysSessionSampleRate?: number;
+  /** Sentry-compatible error-triggered replay sample rate. */
+  replaysOnErrorSampleRate?: number;
   tracesSampleRate?: number;
   service?: string;
   dist?: string;
@@ -179,6 +185,9 @@ export function AllStakProvider({
   sampleRate,
   beforeSend,
   replay,
+  integrations,
+  replaysSessionSampleRate,
+  replaysOnErrorSampleRate,
   tracesSampleRate,
   service,
   dist,
@@ -209,6 +218,7 @@ export function AllStakProvider({
     } else {
       const config: AllStakConfig = {
         apiKey,
+        debug,
         environment,
         release,
         host,
@@ -235,6 +245,9 @@ export function AllStakProvider({
         sampleRate,
         beforeSend,
         replay,
+        integrations,
+        replaysSessionSampleRate,
+        replaysOnErrorSampleRate,
         tracesSampleRate,
         service,
         dist,

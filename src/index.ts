@@ -49,6 +49,45 @@ export type { ScreenshotCapture, ScreenshotCaptureOptions, ScreenshotRedactionMo
 // ── Navigation helpers ──────────────────────────────────────────
 export { instrumentBrowserNavigation, instrumentReactRouter, instrumentNextRouter } from './navigation';
 
+// ── Sentry-compatible surface ───────────────────────────────────
+// Drop-in API parity with @sentry/react (apart from the AllStak `apiKey`):
+// same export names, prop shapes, and integration model so a Sentry React
+// setup can be reused verbatim.
+export type { AllStakIntegration } from './client';
+export {
+  browserTracingIntegration,
+  replayIntegration,
+  feedbackIntegration,
+} from './integrations';
+export type {
+  BrowserTracingOptions,
+  ReplayIntegrationOptions,
+  FeedbackIntegrationOptions,
+} from './integrations';
+export { ErrorBoundary, withErrorBoundary } from './error-boundary';
+export type {
+  ErrorBoundaryProps,
+  ErrorBoundaryFallbackProps,
+  ErrorBoundaryScope,
+  FallbackRender,
+} from './error-boundary';
+export { Profiler, withProfiler, useProfiler } from './profiler';
+export type { ProfilerProps, UseProfilerOptions, WithProfilerOptions } from './profiler';
+export { createReduxEnhancer } from './redux';
+export type { ReduxEnhancerOptions } from './redux';
+export {
+  reactRouterV6BrowserTracingIntegration,
+  reactRouterV7BrowserTracingIntegration,
+  withSentryReactRouterV6Routing,
+  withSentryReactRouterV7Routing,
+  wrapCreateBrowserRouter,
+  wrapCreateBrowserRouterV6,
+  wrapCreateBrowserRouterV7,
+  wrapUseRoutes,
+} from './react-router';
+export type { ReactRouterIntegrationOptions } from './react-router';
+export { __resetRouteTracingForTest } from './route-tracing';
+
 // ── Auto-breadcrumb helpers ─────────────────────────────────────
 export {
   instrumentFetch,
@@ -110,6 +149,7 @@ export type { SessionStatus, SessionContext } from './session';
 // The `apiKey` name is intentional and remains the AllStak project identity.
 export const init = AllStak.init;
 export const captureException = AllStak.captureException;
+export const getLastEventId = AllStak.getLastEventId;
 export const captureMessage = AllStak.captureMessage;
 export const logger = AllStak.logger;
 export const startSpan = AllStak.startSpan;

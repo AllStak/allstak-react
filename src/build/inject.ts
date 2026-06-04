@@ -24,11 +24,22 @@ const DEBUG_ID_LINE_RE = /^\/\/# debugId=([0-9a-f-]{36})\s*$/m;
 const REGISTRATION_MARKER = '/*!__allstak_debug_id_registration__*/';
 
 function buildRegistrationSnippet(jsBody: string, debugId: string): string {
-  const isEsm = /\bimport\.meta\b/.test(jsBody) || /^\s*(?:import|export)\b/m.test(jsBody);
-  if (isEsm) {
+  // Only modules that literally reference `import.meta` get the clean
+  // import.meta.url path. Minified Vite/Rollup output is loaded as
+  // `<script type="module">` but frequently contains NO top-level
+  // import/export/import.meta tokens, so a content sniff can't tell it apart
+  // from a classic script. The fallback below therefore must resolve THIS
+  // script's own URL correctly in BOTH contexts — it cannot rely on
+  // `document.currentScript` (always null inside an ES module) and must never
+  // fall back to `location.href` (that registers the debug id under the PAGE
+  // url, so stack-frame lookups by script url never match → no symbolication).
+  if (/\bimport\.meta\b/.test(jsBody)) {
     return `${REGISTRATION_MARKER}try{(globalThis._allstakDebugIds=globalThis._allstakDebugIds||{})[import.meta.url]="${debugId}"}catch(_){}`;
   }
-  return `${REGISTRATION_MARKER}(function(){try{var u=(typeof document!=="undefined"&&document.currentScript&&document.currentScript.src)||(typeof location!=="undefined"?location.href:"");(globalThis._allstakDebugIds=globalThis._allstakDebugIds||{})[u]="${debugId}"}catch(_){}})();`;
+  // Universal: classic scripts expose document.currentScript.src; ES modules
+  // (where it's null) recover their own URL from a fresh Error's stack — the
+  // innermost frame is this very snippet, i.e. this bundle's URL.
+  return `${REGISTRATION_MARKER}(function(){try{var u=(typeof document!=="undefined"&&document.currentScript&&document.currentScript.src)||"";if(!u){try{throw new Error()}catch(e){var m=(e&&e.stack||"").match(/(?:https?|file|blob):\\/\\/[^\\s)'"]+/g);if(m&&m.length)u=m[0].replace(/:\\d+:\\d+$/,"")}}if(u)(globalThis._allstakDebugIds=globalThis._allstakDebugIds||{})[u]="${debugId}"}catch(_){}})();`;
 }
 
 function stripRegistration(js: string): string {

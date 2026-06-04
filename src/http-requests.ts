@@ -114,8 +114,14 @@ export class HttpRequestModule {
   private destroyed = false;
   private defaults: ModuleDefaults = {};
   private scrubOptions: ValueScrubOptions = {};
+  private onCaptureHook: ((item: HttpRequestIngestItem) => void) | null = null;
 
   constructor(private transport: HttpTransport) {}
+
+  /** Subscribe to every captured request (used to feed the replay timeline). */
+  setOnCapture(fn: (item: HttpRequestIngestItem) => void): void {
+    this.onCaptureHook = fn;
+  }
 
   setDefaults(defaults: ModuleDefaults): void {
     this.defaults = { ...this.defaults, ...defaults };
@@ -174,6 +180,7 @@ export class HttpRequestModule {
     };
 
     this.queue.push(item);
+    try { this.onCaptureHook?.(item); } catch { /* never break capture */ }
     const isFailed = (item.statusCode >= 400) || !!item.error;
     if (isFailed) {
       this.recentFailed.push(item);

@@ -25,6 +25,8 @@ import { resolveRelease } from './release-detect';
 import { SessionTracker } from './session';
 import { OfflineStore, type OfflineStorage } from './offline-store';
 import { scrubEventValues, scrubDeep, scrubString, type ValueScrubOptions } from './pii-scrub';
+import { collectBrowserContext } from './browser-context';
+import { installHistoryNavigationSpans, isRouterInstrumentationActive, setReplayRouteHook } from './route-tracing';
 import {
   blobToBase64,
   capturePrivacySafeScreenshot,
@@ -47,7 +49,7 @@ export const SDK_NAME = 'allstak-react';
 // Keep this in sync with package.json on every version bump.
 declare const __ALLSTAK_REACT_VERSION__: string;
 export const SDK_VERSION: string =
-  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.5.0';
+  typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.6.0';
 
 export { Scope } from './scope';
 export { Span, TracingModule } from './tracing';
@@ -174,6 +176,14 @@ export interface AllStakConfig {
    * {@link autoWebVitals}/{@link enableWebVitals}.
    */
   enablePerformance?: boolean;
+  /**
+   * Suppress the core's default navigation-timing `pageload` span. Set
+   * automatically by the Sentry-compatible tracing integrations
+   * (`browserTracingIntegration` / `reactRouterV6BrowserTracingIntegration`),
+   * which emit their own route-named pageload transaction, so there is exactly
+   * one pageload span. Rarely set by hand.
+   */
+  disableCorePageloadSpan?: boolean;
   /** Mutate or drop a performance span before it leaves the SDK. */
   beforeSendSpan?: (span: SpanData) => SpanData | null | undefined;
   /** URLs that should receive distributed tracing headers. Defaults to all non-AllStak HTTP calls. */
@@ -205,6 +215,35 @@ export interface AllStakConfig {
   maxBreadcrumbs?: number;
   /** Auto-capture unhandled `error` and `unhandledrejection` on `window`. Default: true */
   autoCaptureBrowserErrors?: boolean;
+  /**
+   * Zero-config browser/OS/device/culture context. When `true` (default), the
+   * SDK detects the browser name+version, OS, device type, screen/viewport, and
+   * locale/timezone once at init and attaches them as the `browser`, `os`,
+   * `device`, and `culture` contexts on every event (Sentry-parity). Privacy-
+   * safe and SSR-safe. Set `false` to opt out.
+   */
+  autoBrowserContext?: boolean;
+  /**
+   * Zero-config navigation tracing. When `true` (default), the SDK wraps
+   * `history.pushState`/`replaceState` + `popstate` to emit a real
+   * `navigation` span on every SPA route change — no router integration
+   * required. Stands down automatically when a framework router integration
+   * (`reactRouterV6BrowserTracingIntegration`, …) is active, since that owns
+   * navigation with parameterized route names. Set `false` to opt out.
+   */
+  autoNavigationSpans?: boolean;
+  /**
+   * Zero-config session replay. When `true` (default), replay records with a
+   * sample rate of 1 and masked inputs unless `replay` /
+   * `replaysSessionSampleRate` is set explicitly. Set `false` to opt out.
+   */
+  autoReplay?: boolean;
+  /**
+   * Emit SDK diagnostics to the console (`init` success + session id, dropped
+   * events with the reason — sampleRate/beforeSend-null/dedupe/ignoreErrors).
+   * Default: false. Sentry-parity `debug` flag.
+   */
+  debug?: boolean;
   /** Wrap `globalThis.fetch` to record HTTP breadcrumbs. Default: true */
   autoBreadcrumbsFetch?: boolean;
   /** Wrap `console.*` methods to record log breadcrumbs. Default: true.
@@ -246,6 +285,34 @@ export interface AllStakConfig {
    * the full privacy contract.
    */
   replay?: ReplayOptions;
+  /**
+   * Sentry-compatible integration array (`browserTracingIntegration()`,
+   * `replayIntegration()`, `reactRouterV6BrowserTracingIntegration()`, …).
+   * Each integration may fold options into this config before features are
+   * wired (`processConfig`) and run side-effects after init (`setup`).
+   */
+  integrations?: AllStakIntegration[];
+  /**
+   * Sentry-compatible session-replay sample rate. When set (and `replay` is not
+   * explicitly configured) it enables the replay recorder with this sample
+   * rate. Equivalent to `replay: { enabled: true, sampleRate }`.
+   */
+  replaysSessionSampleRate?: number;
+  /**
+   * Sentry-compatible error-triggered replay sample rate. Used as the replay
+   * sample rate fallback when `replaysSessionSampleRate` is unset.
+   */
+  replaysOnErrorSampleRate?: number;
+  /**
+   * Always-capture probability while the user is inside a critical flow
+   * (checkout / payment / signup / onboarding / billing). A session that enters
+   * a critical route is upgraded to continuous replay capture regardless of the
+   * session sample rate. Default 1 (always capture critical flows).
+   */
+  replayCriticalFlowSampleRate?: number;
+  /** Sentry-compatible flag. Accepted for init parity; structured logs are
+   *  always available via `AllStak.logger`. */
+  enableLogs?: boolean;
   /**
    * Opt into **full** HTTP capture on top of distributed tracing — enables the
    * request/response body + header capture controlled by {@link httpTracking}.
@@ -331,6 +398,18 @@ export interface AllStakConfig {
   branch?: string;
 }
 
+/**
+ * Sentry-compatible integration. Passed via {@link AllStakConfig.integrations}.
+ * `processConfig` runs in the client constructor BEFORE features are wired (so
+ * it can influence replay/tracing/propagation config); `setup` runs AFTER the
+ * client is fully constructed (for side-effects like route instrumentation).
+ */
+export interface AllStakIntegration {
+  name: string;
+  processConfig?(config: AllStakConfig): void;
+  setup?(client: AllStakClient): void;
+}
+
 export interface Breadcrumb {
   timestamp: string;
   type: string;
@@ -370,9 +449,15 @@ export interface ErrorIngestPayload {
   environment?: string;
   release?: string;
   sessionId?: string;
+  /** Replay recording id — links this error to its session replay. */
+  replayId?: string;
   traceId?: string;
   spanId?: string;
   requestId?: string;
+  /** Route/transaction the user was on when the error fired (e.g. /products/:id). */
+  route?: string;
+  /** Client-side capture time (epoch millis) — used to align the replay seek. */
+  timestampMillis?: number;
   user?: { id?: string; email?: string };
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
@@ -489,6 +574,9 @@ export class AllStakClient {
   private transport: HttpTransport;
   private config: AllStakConfig;
   private sessionId: string;
+  private replayId: string = generateId();
+  private currentRoute: string =
+    typeof location !== 'undefined' ? (location.pathname || '/') : '/';
   private breadcrumbs: Breadcrumb[] = [];
   private maxBreadcrumbs: number;
   private globalScopeStack: Scope[] = [];
@@ -504,6 +592,7 @@ export class AllStakClient {
   private eventProcessors: ErrorEventProcessor[] = [];
   private pendingErrorPipelines = new Set<Promise<void>>();
   private lastEventKey: string | null = null;
+  private lastEventId: string | null = null;
   private sessionTracker: SessionTracker | null = null;
   private offlineStore: OfflineStore | null = null;
   private onPageHideHandler: (() => void) | null = null;
@@ -525,6 +614,28 @@ export class AllStakClient {
     );
     this.sessionId = generateId();
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
+    // ── Sentry-compatible integrations + replay sample-rate aliases ──
+    // `processConfig` runs BEFORE features are wired so integrations can fold
+    // their options (replay sample rate, propagation targets, tracing) into the
+    // resolved config below. Fail-open — a broken integration never breaks init.
+    for (const integration of this.config.integrations ?? []) {
+      try { integration.processConfig?.(this.config); }
+      catch { /* never break init */ }
+    }
+    this.applyReplayCompat();
+    // ── Zero-config browser/OS/device/culture context (Sentry-parity) ──
+    // Detected once and attached to every event; user-supplied contexts win.
+    if (this.config.autoBrowserContext !== false) {
+      const autoCtx = collectBrowserContext();
+      const seeded: Record<string, Record<string, unknown>> = {};
+      if (autoCtx.browser && Object.keys(autoCtx.browser).length) seeded.browser = autoCtx.browser;
+      if (autoCtx.os && Object.keys(autoCtx.os).length) seeded.os = autoCtx.os;
+      if (autoCtx.device && Object.keys(autoCtx.device).length) seeded.device = autoCtx.device as Record<string, unknown>;
+      if (autoCtx.culture && Object.keys(autoCtx.culture).length) seeded.culture = autoCtx.culture;
+      if (Object.keys(seeded).length) {
+        this.config.contexts = { ...seeded, ...(this.config.contexts ?? {}) };
+      }
+    }
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
     // Offline/persistent queue: survive a reload/restart + network outage by
     // persisting undelivered (already PII-scrubbed) telemetry. Default ON;
@@ -561,7 +672,8 @@ export class AllStakClient {
       (this.config.enablePerformance !== false && typeof this.config.tracesSampleRate === 'number');
     // Pageload span is cheap + privacy-safe (one navigation-timing span per
     // launch). Ship it by default; only `enablePerformance: false` opts out.
-    const pageloadSpanEnabled = this.config.enablePerformance !== false;
+    const pageloadSpanEnabled =
+      this.config.enablePerformance !== false && this.config.disableCorePageloadSpan !== true;
     if (pageloadSpanEnabled) {
       this.capturePageLoadSpan();
     }
@@ -586,8 +698,9 @@ export class AllStakClient {
     }
     if (config.autoBreadcrumbsClick !== false) {
       try {
+        // beforeBreadcrumb is applied centrally in addBreadcrumb (covers ALL
+        // crumb sources), so it is intentionally NOT passed here.
         instrumentClicks(safeAddBreadcrumb, {
-          beforeBreadcrumb: config.beforeBreadcrumb,
           maxSelectorLength: config.clickBreadcrumbMaxSelectorLength,
         });
       } catch { /* ignore */ }
@@ -651,10 +764,23 @@ export class AllStakClient {
         this.webVitals = startWebVitals(send);
       } catch { /* never break init */ }
     }
-    if (config.replay && (config.replay.enabled ?? true)) {
+    if (this.config.replay && (this.config.replay.enabled ?? true)) {
       try {
-        this.replay = new ReplayRecorder(this.transport, this.sessionId, safeAddBreadcrumb, config.replay);
+        // Replay inherits the SDK's global release/environment automatically so
+        // recordings correlate to deployments without the user setting them twice.
+        this.replay = new ReplayRecorder(this.transport, this.sessionId, safeAddBreadcrumb, {
+          ...this.config.replay,
+          release: this.config.replay.release ?? this.config.release,
+          environment: this.config.replay.environment ?? this.config.environment,
+        });
         this.replay.start();
+        // Feed route changes into the replay timeline + track the active route
+        // so errors can be stamped with it.
+        setReplayRouteHook((route) => {
+          const prev = this.currentRoute;
+          this.currentRoute = route;
+          try { this.replay?.recordNavigation(prev, route, route); } catch { /* ignore */ }
+        });
       } catch { /* never break init */ }
     }
     // HTTP instrumentation installs the fetch/XHR/axios wrappers that do TWO
@@ -666,10 +792,24 @@ export class AllStakClient {
     // autoBreadcrumbsFetch); full body/header capture stays opt-in behind
     // `enableHttpTracking`. We install the module when EITHER is requested.
     const fullHttpCapture = config.enableHttpTracking === true;
-    const distributedTracing = config.enableDistributedTracing !== false;
+    const distributedTracing = this.config.enableDistributedTracing !== false;
     if (fullHttpCapture || distributedTracing) {
       try {
         this.httpRequests = new HttpRequestModule(this.transport);
+        // Feed every captured request into the replay timeline (already
+        // URL-redacted/scrubbed; the replay net event carries no headers/body).
+        this.httpRequests.setOnCapture((item) => {
+          try {
+            this.replay?.recordNetwork({
+              method: item.method,
+              url: item.url,
+              statusCode: item.statusCode,
+              durationMs: item.durationMs,
+              requestId: item.requestId,
+              ok: item.statusCode > 0 && item.statusCode < 400 && !item.error,
+            });
+          } catch { /* ignore */ }
+        });
         this.httpRequests.setValueScrubOptions(this.valueScrubOptions());
         this.httpRequests.setDefaults({
           environment: this.config.environment,
@@ -702,11 +842,73 @@ export class AllStakClient {
             platform: this.config.platform,
             environment: this.config.environment,
             sessionId: this.sessionId,
-            tracePropagationTargets: config.tracePropagationTargets,
+            tracePropagationTargets: this.config.tracePropagationTargets,
           },
         );
         this._instrumentAxios = instrumentAxios;
       } catch { /* never break init */ }
+    }
+
+    // ── Sentry-compatible integration side-effects ──
+    // `setup` runs LAST, after every feature is wired, so route/perf
+    // integrations can safely emit spans against the live client.
+    for (const integration of this.config.integrations ?? []) {
+      try { integration.setup?.(this); }
+      catch { /* never break init */ }
+    }
+
+    // ── Zero-config navigation spans (Sentry-parity) ──
+    // History-based `navigation` spans by default — no router integration
+    // needed. Stands down when a framework router integration is active (it
+    // owns navigation with parameterized route names).
+    if (this.config.autoNavigationSpans !== false && !isRouterInstrumentationActive()) {
+      try { installHistoryNavigationSpans(); }
+      catch { /* never break init */ }
+    }
+
+    this.debugLog(
+      `init ok — session ${this.sessionId}, env ${this.config.environment}, release ${this.config.release}`,
+      { replay: !!this.config.replay, integrations: (this.config.integrations ?? []).map((i) => i.name) },
+    );
+  }
+
+  /**
+   * Map the Sentry-compatible `replaysSessionSampleRate` /
+   * `replaysOnErrorSampleRate` onto the AllStak `replay` recorder config when
+   * `replay` was not configured explicitly (the explicit config always wins).
+   */
+  private applyReplayCompat(): void {
+    const c = this.config;
+    // Identity + context attached to every replay flush. Always populated so
+    // the explicit-config path also carries release/env and links to errors.
+    const baseTiers = {
+      replaySessionSampleRate: c.replaysSessionSampleRate,
+      replayOnErrorSampleRate: c.replaysOnErrorSampleRate,
+      replayCriticalFlowSampleRate: c.replayCriticalFlowSampleRate,
+      release: c.release,
+      environment: c.environment,
+      replayId: this.replayId,
+    };
+    if (c.replay) {
+      c.replay = { ...baseTiers, ...c.replay };
+      return;
+    }
+    const session = c.replaysSessionSampleRate;
+    const onError = c.replaysOnErrorSampleRate;
+    if (typeof session === 'number' || typeof onError === 'number') {
+      c.replay = {
+        enabled: true,
+        sampleRate: typeof session === 'number' ? session : 0,
+        maskAllInputs: true,
+        ...baseTiers,
+      };
+      return;
+    }
+    // Zero-config: session replay is on by default (Sentry-parity mission).
+    // Opt out with `autoReplay: false` or `replaysSessionSampleRate: 0`.
+    // Inputs are masked by default; tune the rate in production for cost.
+    if (c.autoReplay !== false) {
+      c.replay = { enabled: true, sampleRate: 1, maskAllInputs: true, ...baseTiers };
     }
   }
 
@@ -721,8 +923,27 @@ export class AllStakClient {
     return this.httpRequests?.getRecentFailed() ?? [];
   }
 
-  captureException(error: Error, context?: Record<string, unknown>): void {
-    if (!this.passesSampleRate()) return;
+  captureException(error: Error, context?: Record<string, unknown>): string {
+    // The eventId is generated first and ALWAYS returned (Sentry parity) so a
+    // caller — e.g. ErrorBoundary's fallback / a "reference this ID" flow — gets
+    // the SAME id that lands in the dashboard, even if the event is sampled out.
+    const eventId = generateId();
+    this.lastEventId = eventId;
+    if (!this.passesSampleRate()) return eventId;
+    // `beforeCapture`/context may carry level + fingerprint; those drive the
+    // wire `level`/`fingerprint` fields (severity + grouping), NOT metadata.
+    const ctxLevel =
+      typeof context?.level === 'string' ? (context.level as SeverityLevel) : undefined;
+    const ctxFingerprint =
+      Array.isArray(context?.fingerprint) && context.fingerprint.length > 0
+        ? (context.fingerprint as string[])
+        : undefined;
+    let metaContext = context;
+    if (context && (ctxLevel || ctxFingerprint)) {
+      metaContext = { ...context };
+      delete (metaContext as Record<string, unknown>).level;
+      delete (metaContext as Record<string, unknown>).fingerprint;
+    }
     const frames = parseStack(error.stack).map((f) => ({
       ...f,
       platform: this.config.platform,
@@ -742,6 +963,12 @@ export class AllStakClient {
       'Error';
     const eff = this.effective();
     const traceContext: Record<string, unknown> = {};
+    // Route + client capture time travel in metadata so the backend stores them
+    // (errors.metadata.route) without a schema change, and the dashboard can show
+    // the route on the error + align the replay seek.
+    traceContext.route = this.currentRoute;
+    traceContext.replayId = this.replayId;
+    traceContext.timestampMillis = Date.now();
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
     const spanId = this.tracing.getCurrentSpanId();
@@ -755,7 +982,7 @@ export class AllStakClient {
     }
 
     const payload: ErrorIngestPayload = {
-      eventId: generateId(),
+      eventId,
       exceptionClass,
       message: error.message,
       stackTrace,
@@ -764,21 +991,34 @@ export class AllStakClient {
       sdkName: this.config.sdkName,
       sdkVersion: this.config.sdkVersion,
       dist: this.config.dist,
-      level: eff.level ?? 'error',
+      level: ctxLevel ?? eff.level ?? 'error',
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
+      replayId: this.replayId,
       traceId,
       spanId: spanId ?? undefined,
       requestId: recentFailed[recentFailed.length - 1]?.requestId,
+      route: this.currentRoute,
+      timestampMillis: Date.now(),
       user: eff.user,
-      metadata: { ...this.buildMetadata(context), ...traceContext },
+      metadata: { ...this.buildMetadata(metaContext), ...traceContext },
       breadcrumbs: currentBreadcrumbs,
       requestContext: browserRequestContext(),
-      fingerprint: eff.fingerprint,
+      fingerprint: ctxFingerprint ?? eff.fingerprint,
     };
+    // Drop an error marker into the replay stream (client clock) and trigger the
+    // pre-error buffer flush, so the replay carries the exact error moment and
+    // the dashboard can jump to it without clock-skew guesswork.
+    try { this.replay?.recordError(eventId, error.message, exceptionClass); } catch { /* ignore */ }
     this.recordSessionStatusForEvent(payload, context);
     this.enqueueErrorPipeline(payload, true);
+    return eventId;
+  }
+
+  /** The id of the most recently captured event (Sentry parity). */
+  getLastEventId(): string | null {
+    return this.lastEventId;
   }
 
   /**
@@ -898,13 +1138,24 @@ export class AllStakClient {
   }
 
   addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void {
-    const crumb: Breadcrumb = {
+    let crumb: Breadcrumb = {
       timestamp: new Date().toISOString(),
       type: VALID_BREADCRUMB_TYPES.has(type) ? type : 'default',
       message,
       level: level && VALID_BREADCRUMB_LEVELS.has(level) ? level : 'info',
       ...(data ? { data } : {}),
     };
+    // Apply `beforeBreadcrumb` CENTRALLY so EVERY crumb (console/fetch/nav/
+    // redux/manual/click) honors it — return null to drop. Fail-open.
+    if (this.config.beforeBreadcrumb) {
+      try {
+        const result = this.config.beforeBreadcrumb(crumb);
+        if (!result) return;
+        crumb = { ...crumb, ...result };
+      } catch {
+        /* keep the unmodified crumb — a broken hook must not drop telemetry */
+      }
+    }
     if (this.breadcrumbs.length >= this.maxBreadcrumbs) this.breadcrumbs.shift();
     this.breadcrumbs.push(crumb);
   }
@@ -1045,6 +1296,11 @@ export class AllStakClient {
   private startSession(): void {
     if (this.config.enableAutoSessionTracking === false) return;
     if (isLikelyTestRuntime()) return;
+    // SSR/Next safety: never open a release-health session from the server
+    // (Node, no `window`). A client component rendered during SSR would
+    // otherwise POST a phantom server-origin session and corrupt crash-free
+    // math. Capture APIs stay callable; the session opens on the client.
+    if (typeof window === 'undefined') return;
     try {
       this.sessionTracker = new SessionTracker(
         this.transport,
@@ -1128,11 +1384,20 @@ export class AllStakClient {
     });
   }
 
+  /** Console diagnostics, only when `debug: true`. Namespaced + fail-open. */
+  debugLog(...args: unknown[]): void {
+    if (this.config.debug !== true) return;
+    try { (console.debug ?? console.log)('[AllStak]', ...args); }
+    catch { /* never break the host */ }
+  }
+
   private passesSampleRate(): boolean {
     const r = this.config.sampleRate;
     if (typeof r !== 'number' || r >= 1) return true;
     if (r <= 0) return false;
-    return Math.random() < r;
+    const passes = Math.random() < r;
+    if (!passes) this.debugLog('event dropped: sampleRate', r);
+    return passes;
   }
 
   /**
@@ -1608,8 +1873,12 @@ export const AllStak = {
     instance = new AllStakClient(config);
     return instance;
   },
-  captureException(error: Error, context?: Record<string, unknown>): void {
-    ensureInit().captureException(error, context);
+  captureException(error: Error, context?: Record<string, unknown>): string {
+    return ensureInit().captureException(error, context);
+  },
+  /** The id of the most recently captured event (Sentry parity). */
+  getLastEventId(): string | null {
+    return instance?.getLastEventId() ?? null;
   },
   captureMessage(
     message: string,
