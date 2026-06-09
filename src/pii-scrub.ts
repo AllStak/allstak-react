@@ -92,6 +92,24 @@ const IPV6 =
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 
+/**
+ * `key=value` / `key: value` secret pairs embedded in free text (breadcrumb
+ * messages, console lines, exception messages). The backend scrubs these too,
+ * but the client-side wire guarantee must not depend on it — and the pattern
+ * must match at position 0 of a string (a leading-anchor gap let
+ * `password=...` at string start reach the wire in the sibling SDKs, found
+ * live by the sdk-validation harness). Always scrubbed; the key is kept.
+ */
+const KV_SECRET =
+  /(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?|credentials?|private[_-]?key|client[_-]?secret|otp)(\s*[=:]\s*)[^\s&"',;]+/gi;
+
+/**
+ * IBAN in free text (ISO 13616: 2 uppercase letters, 2 check digits, 11-30
+ * alphanumeric BBAN). Always-on — the primary deployment market (Saudi
+ * banking/government) treats IBANs as directly identifying financial data.
+ */
+const IBAN_VALUE = /\b[A-Z]{2}\d{2}[A-Za-z0-9]{11,30}\b/g;
+
 const SENSITIVE_KEY_PARTS = [
   'authorization',
   'proxy-authorization',
@@ -180,6 +198,12 @@ export function scrubString(input: string, opts: ValueScrubOptions = {}): string
     // (A) bearer/JWT tokens — credentials are never valid telemetry.
     out = replaceAll(out, BEARER_VALUE);
     out = replaceAll(out, JWT_VALUE);
+
+    // (A) key=value secret pairs + IBANs in free text.
+    KV_SECRET.lastIndex = 0;
+    out = out.replace(KV_SECRET, (_m, key: string, sep: string) => `${key}${sep}${REDACTED}`);
+    KV_SECRET.lastIndex = 0;
+    out = replaceAll(out, IBAN_VALUE);
 
     // (B) email + IP — only when the user has NOT opted into PII.
     if (opts.sendDefaultPii !== true) {

@@ -357,10 +357,13 @@ test('wire: stack frame paths / release / sdk fields are NOT corrupted', async (
 test('wire: key-based query-param redaction still works (regression guard)', async () => {
   // The existing key-name redactor (http-redact) is independent of value
   // scrubbing — confirm a request URL value scrubber pass does not break it.
+  // The KV_SECRET value pattern now redacts secret query-pair values directly
+  // (defense in depth on top of the key-name redactor) while leaving the URL
+  // structure and non-secret params intact.
   assert.equal(
     scrubString('https://api.example.com/cb?token=secret&state=ok'),
-    'https://api.example.com/cb?token=secret&state=ok',
-    'value scrubber leaves a non-PII URL untouched (key redaction handled upstream)',
+    'https://api.example.com/cb?token=[REDACTED]&state=ok',
+    'secret query value redacted in place; URL structure and other params intact',
   );
 });
 
@@ -447,4 +450,23 @@ test('scrubDeep drops __proto__ / constructor / prototype keys', () => {
   assert.equal(Object.getPrototypeOf(out), Object.prototype, 'output prototype is untouched');
   assert.equal(out.polluted, undefined, 'no value smuggled via the prototype slot');
   assert.equal({}.polluted, undefined, 'global Object.prototype is not polluted');
+});
+
+// ── Free-text key=value secrets + IBAN (sdk-validation regressions) ─────────
+
+test('kv secrets scrubbed even at position 0 of a string', () => {
+  assert.equal(scrubString('password=hunter2 rest'), 'password=[REDACTED] rest');
+  assert.equal(scrubString('note api_key=ask_live_abc done'), 'note api_key=[REDACTED] done');
+  assert.equal(scrubString('otp: 123456'), 'otp: [REDACTED]');
+});
+
+test('IBAN scrubbed always, even with sendDefaultPii', () => {
+  assert.ok(!scrubString('to SA4420000001234567891234 sent', { sendDefaultPii: true }).includes('SA4420000001234567891234'));
+  assert.ok(!scrubString('iban DE89370400440532013000 ok').includes('DE89370400440532013000'));
+});
+
+test('kv/IBAN do not over-scrub ordinary text', () => {
+  assert.equal(scrubString('order id 1234 for user'), 'order id 1234 for user');
+  assert.equal(scrubString('auth flow started'), 'auth flow started');
+  assert.equal(scrubString('SA44 is a region code'), 'SA44 is a region code');
 });
