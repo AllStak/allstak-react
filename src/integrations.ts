@@ -82,6 +82,10 @@ export interface ReplayIntegrationOptions {
   onErrorSampleRate?: number;
   /** Mask all text inputs in the replay. Default: true. */
   maskAllInputs?: boolean;
+  /** Mask ALL text nodes with same-length `*` (Sentry parity). Default: true. */
+  maskAllText?: boolean;
+  /** CSS selectors whose subtree text is exempt from `maskAllText`. */
+  unmask?: string[];
   maxBufferedEvents?: number;
 }
 
@@ -107,7 +111,9 @@ export function replayIntegration(options: ReplayIntegrationOptions = {}): AllSt
         enabled: true,
         sampleRate,
         maskAllInputs: options.maskAllInputs ?? true,
+        maskAllText: options.maskAllText ?? true,
       };
+      if (Array.isArray(options.unmask)) replay.unmask = options.unmask;
       if (typeof options.maxBufferedEvents === 'number') {
         replay.maxBufferedEvents = options.maxBufferedEvents;
       }

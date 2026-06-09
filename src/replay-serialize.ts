@@ -14,8 +14,13 @@
  *   - SVG namespace, scroll positions captured separately
  *   - <script> stripped; <canvas>/<iframe> kept as elements (content omitted)
  *
- * Privacy: inputs masked by default; [data-allstak-mask] subtrees → "***";
- * [type=password] always masked.
+ * Privacy: inputs masked by default; ALL text nodes masked by default
+ * (same-length `*` masking, layout-preserving) unless the element is
+ * explicitly allowlisted via an `unmask` selector; [data-allstak-mask]
+ * subtrees → "***" (always wins over unmask); [type=password] always masked.
+ * Every string that still leaves unmasked (text, attribute values like
+ * placeholder/title/alt, input values) is routed through the same PII
+ * value-scrubber used for error payloads (`scrubText`).
  */
 
 export const NodeKind = { DOCUMENT: 0, DOCTYPE: 1, ELEMENT: 2, TEXT: 3, COMMENT: 4 } as const;
@@ -43,9 +48,53 @@ export interface SerializedNode {
 export interface SerializeOptions {
   maskAllInputs: boolean;
   maskAttribute: string;
+  /**
+   * Mask EVERY text node with same-length `*` characters (layout-preserving)
+   * unless an ancestor matches one of {@link unmaskSelectors}. Default true at
+   * the recorder level — page text (names, emails, balances, national IDs)
+   * never leaves the client unmasked unless explicitly allowlisted.
+   */
+  maskAllText?: boolean;
+  /** CSS selectors whose subtree text is exempt from `maskAllText`. */
+  unmaskSelectors?: string[];
+  /**
+   * PII value-scrubber applied to every string that leaves unmasked (text
+   * nodes exempted via unmask, attribute values, unmasked input values).
+   * Same scrubber as the error path (`scrubString`).
+   */
+  scrubText?: (value: string) => string;
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** Same-length `*` masking that preserves whitespace, so layout survives. */
+export function maskTextValue(text: string): string {
+  return text.replace(/\S/g, '*');
+}
+
+/** True when `el` (or an ancestor) matches one of the unmask selectors. */
+export function isUnmaskedElement(el: Element | null | undefined, selectors: string[] | undefined): boolean {
+  if (!el || !selectors || selectors.length === 0) return false;
+  for (const sel of selectors) {
+    try {
+      if (typeof el.closest === 'function' && el.closest(sel)) return true;
+    } catch { /* invalid selector — ignore */ }
+  }
+  return false;
+}
+
+function applyScrub(value: string, opts: SerializeOptions): string {
+  return opts.scrubText ? opts.scrubText(value) : value;
+}
+
+/** The text-node masking policy shared by snapshot + mutation paths. */
+export function maskOrScrubText(raw: string, parent: Element | null, masked: boolean, opts: SerializeOptions): string {
+  if (masked && raw.trim()) return '••••••';
+  if (opts.maskAllText && raw.trim() && !isUnmaskedElement(parent, opts.unmaskSelectors)) {
+    return maskTextValue(raw);
+  }
+  return applyScrub(raw, opts);
+}
 
 /** Owns the node→id map for one recording. Stable across mutations. */
 export class NodeIdMap {
@@ -76,7 +125,8 @@ export class NodeIdMap {
 function maskValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, opts: SerializeOptions): string {
   if ((el as HTMLInputElement).type === 'password') return '••••••';
   if (opts.maskAllInputs) return el.value ? '•'.repeat(Math.min(el.value.length, 12)) : '';
-  return String(el.value ?? '');
+  // Unmasked input values still pass through the PII value-scrubber.
+  return applyScrub(String(el.value ?? ''), opts);
 }
 
 // GAP 2 — cross-origin stylesheets can't be read via `cssRules` (SecurityError),
@@ -165,7 +215,9 @@ function serializeAttrs(el: Element, opts: SerializeOptions): Record<string, str
   for (const a of Array.from(el.attributes)) {
     // Never record inline event handlers or nonces.
     if (a.name.startsWith('on') || a.name === 'nonce') continue;
-    attrs[a.name] = a.value;
+    // Every recorded attribute value (placeholder/title/alt/aria-label/…)
+    // passes through the same PII value-scrubber as the error path.
+    attrs[a.name] = applyScrub(a.value, opts);
   }
   const tag = el.tagName.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select') {
@@ -183,7 +235,7 @@ function serializeAttrs(el: Element, opts: SerializeOptions): Record<string, str
   for (const k of ['src', 'href']) {
     const v = el.getAttribute(k);
     if (v && !v.startsWith('data:') && !v.startsWith('blob:')) {
-      try { attrs[k] = new URL(v, location.href).href; } catch { /* keep */ }
+      try { attrs[k] = applyScrub(new URL(v, location.href).href, opts); } catch { /* keep */ }
     }
   }
   return attrs;
@@ -255,7 +307,7 @@ export function serializeNode(node: Node, ids: NodeIdMap, opts: SerializeOptions
     }
     case Node.TEXT_NODE: {
       const raw = node.nodeValue || '';
-      return { id: ids.assign(node), k: NodeKind.TEXT, text: mask && raw.trim() ? '••••••' : raw };
+      return { id: ids.assign(node), k: NodeKind.TEXT, text: maskOrScrubText(raw, node.parentElement, mask, opts) };
     }
     case Node.COMMENT_NODE: {
       return { id: ids.assign(node), k: NodeKind.COMMENT, text: node.nodeValue || '' };
@@ -290,5 +342,6 @@ export function serializeAttributeValue(el: Element, name: string, opts: Seriali
   if ((name === 'src' || name === 'href') && !v.startsWith('data:') && !v.startsWith('blob:')) {
     try { return new URL(v, location.href).href; } catch { return v; }
   }
-  return v;
+  // Same PII value-scrubbing as the snapshot path (placeholder/title/alt/…).
+  return applyScrub(v, opts);
 }

@@ -442,3 +442,21 @@ test('13. pagehide flush persists buffered telemetry so it is not lost on tab cl
   const raw = storage.getItem('tx13') ?? '';
   assert.match(raw, /in-flight-on-close/, 'buffered event survives the tab close via the store');
 });
+
+test('14. tampered store entries are rebuilt from known fields (no __proto__ smuggling)', () => {
+  const storage = makeStorage();
+  // Simulate a tampered/poisoned localStorage value: extra keys including
+  // prototype-pollution vectors ride alongside a well-formed entry.
+  // Raw JSON string (NOT an object literal — `__proto__:` in source would set
+  // the prototype instead of creating an own key).
+  storage.setItem('k14',
+    '[{"id":"e1","path":"/ingest/v1/errors","payload":{"message":"ok"},"ts":' + Date.now() +
+    ',"__proto__":{"polluted":true},"constructor":{"evil":1},"extraneous":"x"},{"id":"bad"}]');
+  const store = new OfflineStore({ storage, key: 'k14' });
+  const loaded = store.load();
+  assert.equal(loaded.length, 1, 'malformed entries are filtered');
+  assert.deepEqual(Object.keys(loaded[0]).sort(), ['id', 'path', 'payload', 'ts'],
+    'entries are rebuilt with ONLY the known fields');
+  assert.equal(Object.getPrototypeOf(loaded[0]), Object.prototype);
+  assert.equal({}.polluted, undefined, 'global Object.prototype must not be polluted');
+});

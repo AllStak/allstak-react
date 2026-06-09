@@ -8,11 +8,11 @@
  *   setUser / setTag / setIdentity / getSessionId
  */
 
-import { HttpTransport, type TransportStats } from './transport';
+import { HttpTransport, assertSecureIngestUrl, type TransportStats } from './transport';
 import { parseStack } from './stack';
 import { instrumentFetch, instrumentConsole, instrumentClicks } from './auto-breadcrumbs';
 import { instrumentBrowserNavigation, __setDefaultBreadcrumbForwarder } from './navigation';
-import { Scope, mergeScopes } from './scope';
+import { Scope, mergeScopes, type AllStakUser } from './scope';
 import { TracingModule, Span, type SpanData, type SpanOptions } from './tracing';
 import { ReplayRecorder, ReplayOptions } from './replay';
 import { resolveDebugId } from './debug-id';
@@ -52,6 +52,7 @@ export const SDK_VERSION: string =
   typeof __ALLSTAK_REACT_VERSION__ !== 'undefined' ? __ALLSTAK_REACT_VERSION__ : '0.6.0';
 
 export { Scope } from './scope';
+export type { AllStakUser } from './scope';
 export { Span, TracingModule } from './tracing';
 export type { SpanData, SpanOptions } from './tracing';
 
@@ -72,8 +73,20 @@ const DEFAULT_IGNORE_ERRORS: EventFilterPattern[] = [
 export interface AllStakConfig {
   /** Project API key (`ask_live_…`). Required. */
   apiKey: string;
-  /** Optional ingest host override; defaults to {@link INGEST_HOST}. */
+  /**
+   * Optional ingest host override; defaults to {@link INGEST_HOST}. Must be
+   * `https://` — a plaintext `http://` host is rejected at init with a
+   * `TypeError` unless it is a loopback host (`localhost`, `127.0.0.1`,
+   * `::1`, `0.0.0.0`, `*.localhost`) or {@link allowInsecureHost} is set.
+   */
   host?: string;
+  /**
+   * Escape hatch for trusted internal networks: accept a plaintext `http://`
+   * ingest host/tunnel instead of failing init. Emits a LOUD console warning —
+   * the project ingest key and all telemetry (including replay DOM data)
+   * travel unencrypted. Never use in production. Default `false`.
+   */
+  allowInsecureHost?: boolean;
   /**
    * Optional browser-side tunnel endpoint. Keeps the public API compatible
    * with namespace-compatible tunneling while preserving AllStak's `apiKey` identity.
@@ -138,13 +151,17 @@ export interface AllStakConfig {
    *     allowed.
    *
    * Credit-card numbers (Luhn-valid) and US SSNs are ALWAYS scrubbed
-   * regardless of this flag. The explicit `user` object set via `setUser`
-   * (id / email) is NEVER scrubbed by this flag — explicitly-provided user
-   * identification ships as before. Key-name based secret redaction
+   * regardless of this flag. Key-name based secret redaction
    * (password / token / cookie / api_key …) is unaffected and always on.
+   *
+   * This flag ALSO governs the explicit `user` object (set via config or
+   * `setUser`): when `false` (default) the PII fields `email`, `username`,
+   * `name`, and `ip`/`ip_address` are DROPPED before the wire — only the
+   * pseudonymous `id` (plus custom fields, value-scrubbed) ships. Set
+   * `true` to send them.
    */
   sendDefaultPii?: boolean;
-  user?: { id?: string; email?: string };
+  user?: AllStakUser;
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
   extras?: Record<string, unknown>;
@@ -234,7 +251,8 @@ export interface AllStakConfig {
   autoNavigationSpans?: boolean;
   /**
    * Zero-config session replay. When `true` (default), replay records with a
-   * sample rate of 1 and masked inputs unless `replay` /
+   * sample rate of 1, masked inputs AND masked text (`maskAllInputs` +
+   * `maskAllText`, both default true) unless `replay` /
    * `replaysSessionSampleRate` is set explicitly. Set `false` to opt out.
    */
   autoReplay?: boolean;
@@ -458,7 +476,7 @@ export interface ErrorIngestPayload {
   route?: string;
   /** Client-side capture time (epoch millis) — used to align the replay seek. */
   timestampMillis?: number;
-  user?: { id?: string; email?: string };
+  user?: AllStakUser;
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
   requestContext?: { method?: string; path?: string; host?: string; userAgent?: string };
@@ -637,12 +655,19 @@ export class AllStakClient {
       }
     }
     const baseUrl = (config.host ?? INGEST_HOST).replace(/\/$/, '');
+    // C1 — HTTPS enforcement: a plaintext http:// ingest host or tunnel (other
+    // than loopback) fails init with a TypeError unless `allowInsecureHost`
+    // explicitly opts in (which warns loudly instead).
+    const allowInsecureHost = this.config.allowInsecureHost === true;
+    assertSecureIngestUrl(baseUrl, allowInsecureHost);
+    assertSecureIngestUrl(config.tunnel, allowInsecureHost);
     // Offline/persistent queue: survive a reload/restart + network outage by
     // persisting undelivered (already PII-scrubbed) telemetry. Default ON;
     // degrades silently to in-memory-only when storage is unavailable.
     this.offlineStore = this.createOfflineStore();
     this.transport = new HttpTransport(baseUrl, config.apiKey, {
       tunnel: config.tunnel,
+      allowInsecureHost,
       ...(this.offlineStore ? { offlineStore: this.offlineStore } : {}),
     });
     // Replay anything persisted on a previous launch. Async + fail-open.
@@ -772,6 +797,9 @@ export class AllStakClient {
           ...this.config.replay,
           release: this.config.replay.release ?? this.config.release,
           environment: this.config.replay.environment ?? this.config.environment,
+          // Replay stream PII scrubbing honors the same sendDefaultPii flag
+          // as the error path (CC/SSN always scrubbed regardless).
+          valueScrubOptions: this.valueScrubOptions(),
         });
         this.replay.start();
         // Feed route changes into the replay timeline + track the active route
@@ -900,15 +928,17 @@ export class AllStakClient {
         enabled: true,
         sampleRate: typeof session === 'number' ? session : 0,
         maskAllInputs: true,
+        maskAllText: true,
         ...baseTiers,
       };
       return;
     }
-    // Zero-config: session replay is on by default (Sentry-parity mission).
-    // Opt out with `autoReplay: false` or `replaysSessionSampleRate: 0`.
-    // Inputs are masked by default; tune the rate in production for cost.
+    // Zero-config: session replay is on by default (Sentry-parity mission) and
+    // is privacy-safe by default: inputs AND text are masked (`maskAllText` +
+    // `maskAllInputs`). Opt out with `autoReplay: false` or
+    // `replaysSessionSampleRate: 0`; allowlist text via `replay.unmask`.
     if (c.autoReplay !== false) {
-      c.replay = { enabled: true, sampleRate: 1, maskAllInputs: true, ...baseTiers };
+      c.replay = { enabled: true, sampleRate: 1, maskAllInputs: true, maskAllText: true, ...baseTiers };
     }
   }
 
@@ -1161,7 +1191,13 @@ export class AllStakClient {
   }
 
   clearBreadcrumbs(): void { this.breadcrumbs = []; }
-  setUser(user: { id?: string; email?: string }): void { this.config.user = user; }
+  /**
+   * Set the user attached to subsequent events. Privacy-by-default: unless
+   * `sendDefaultPii: true`, the `email`/`username`/`name`/`ip`/`ip_address`
+   * fields are dropped before the wire — only `id` (plus custom fields,
+   * value-scrubbed) ships.
+   */
+  setUser(user: AllStakUser): void { this.config.user = user; }
   setTag(key: string, value: string): void {
     if (!this.config.tags) this.config.tags = {};
     this.config.tags[key] = value;
@@ -1534,8 +1570,31 @@ export class AllStakClient {
     return true;
   }
 
+  /**
+   * Privacy-by-default (C2): with `sendDefaultPii` falsy, drop the PII fields
+   * of the explicit user object (`email`/`username`/`name`/`ip`/`ip_address`)
+   * before the wire. The pseudonymous `id` (and custom fields, which remain
+   * subject to the value scrubber) is kept. No-op when opted in.
+   */
+  private stripDefaultPiiFromUser(user: AllStakUser | undefined): AllStakUser | undefined {
+    if (this.config.sendDefaultPii === true) return user;
+    if (!user || typeof user !== 'object') return user;
+    try {
+      const out: AllStakUser = { ...user };
+      for (const field of ['email', 'username', 'name', 'ip', 'ip_address', 'ipAddress']) {
+        delete out[field];
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    } catch {
+      return user; // fail-open — the value scrubber still runs downstream
+    }
+  }
+
   private async applyBeforeSend(payload: ErrorIngestPayload): Promise<ErrorIngestPayload | null | undefined> {
     let final: ErrorIngestPayload | null | undefined = payload;
+    // Privacy-by-default user sanitation runs FIRST so processors/beforeSend
+    // already see the wire-shaped user object.
+    payload.user = this.stripDefaultPiiFromUser(payload.user);
     // Built-in value-pattern PII scrubber runs FIRST on the wire path so that
     // user-supplied processors + beforeSend see already-scrubbed free text.
     // Fail-open: scrubEventValues never throws, but guard anyway.
@@ -1551,6 +1610,9 @@ export class AllStakClient {
       try { final = await this.config.beforeSend(final); }
       catch { final = payload; /* never let a buggy hook drop telemetry */ }
     }
+    // Re-apply the user PII drop + value scrubbers AFTER processors/beforeSend
+    // so a hook cannot reintroduce dropped PII.
+    if (final) final.user = this.stripDefaultPiiFromUser(final.user);
     try { final = final ? scrubEventValues(final, this.valueScrubOptions()) : final; }
     catch { /* final scrubber is fail-open, but transport must never throw here */ }
     if (!final || this.shouldDropDuplicate(final)) return null;
@@ -1868,8 +1930,15 @@ function safeAddBreadcrumb(
 __setDefaultBreadcrumbForwarder(safeAddBreadcrumb);
 
 export const AllStak = {
+  /**
+   * Initialize the SDK. Throws a `TypeError` when `host`/`tunnel` is an
+   * insecure non-loopback `http://` URL (or a non-http(s) scheme) and
+   * `allowInsecureHost` is not set — see {@link AllStakConfig.host}.
+   */
   init(config: AllStakConfig): AllStakClient {
-    if (instance) instance.destroy();
+    if (instance) { instance.destroy(); instance = null; }
+    // If construction throws (e.g. C1 insecure-host rejection), the SDK is
+    // left uninitialized — every facade call stays a no-op / explicit error.
     instance = new AllStakClient(config);
     return instance;
   },
@@ -1911,7 +1980,12 @@ export const AllStak = {
     ensureInit().addBreadcrumb(type, message, level, data);
   },
   clearBreadcrumbs(): void { ensureInit().clearBreadcrumbs(); },
-  setUser(user: { id?: string; email?: string }): void { ensureInit().setUser(user); },
+  /**
+   * Set the user attached to subsequent events. Privacy-by-default: unless
+   * `sendDefaultPii: true`, `email`/`username`/`name`/`ip` are dropped before
+   * the wire — only the pseudonymous `id` ships.
+   */
+  setUser(user: AllStakUser): void { ensureInit().setUser(user); },
   setTag(key: string, value: string): void { ensureInit().setTag(key, value); },
   setTags(tags: Record<string, string>): void { ensureInit().setTags(tags); },
   setExtra(key: string, value: unknown): void { ensureInit().setExtra(key, value); },

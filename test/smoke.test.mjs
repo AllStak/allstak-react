@@ -75,7 +75,9 @@ test('setUser / setTag / setIdentity flow through wire payload', async () => {
   AllStak.captureException(new Error('with-meta'));
   await new Promise((r) => setTimeout(r, 50));
   const body = JSON.parse(sent[0].init.body);
-  assert.deepEqual(body.user, { id: 'u-1', email: 'a@b.com' });
+  // Privacy-by-default: user email is dropped before the wire (no
+  // sendDefaultPii opt-in here); the pseudonymous id ships.
+  assert.deepEqual(body.user, { id: 'u-1' });
   assert.equal(body.dist, 'web-prod');
   assert.equal(body.metadata['feature'], 'checkout');
 });

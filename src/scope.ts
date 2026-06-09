@@ -17,15 +17,31 @@
 
 export type Severity = 'fatal' | 'error' | 'warning' | 'info' | 'debug';
 
+/**
+ * User identity attached to events. With `sendDefaultPii: false` (the default)
+ * the PII fields (`email`, `username`, `name`, `ip`/`ip_address`) are DROPPED
+ * before the wire — only the pseudonymous `id` (plus custom fields, value-
+ * scrubbed) ships. Set `sendDefaultPii: true` to opt into sending them.
+ */
+export interface AllStakUser {
+  id?: string;
+  email?: string;
+  username?: string;
+  name?: string;
+  ip?: string;
+  ip_address?: string;
+  [key: string]: unknown;
+}
+
 export class Scope {
-  user?: { id?: string; email?: string };
+  user?: AllStakUser;
   tags: Record<string, string> = {};
   extras: Record<string, unknown> = {};
   contexts: Record<string, Record<string, unknown>> = {};
   fingerprint?: string[];
   level?: Severity;
 
-  setUser(user: { id?: string; email?: string }): this { this.user = user; return this; }
+  setUser(user: AllStakUser): this { this.user = user; return this; }
   setTag(key: string, value: string): this { this.tags[key] = value; return this; }
   setTags(tags: Record<string, string>): this { Object.assign(this.tags, tags); return this; }
   setExtra(key: string, value: unknown): this { this.extras[key] = value; return this; }
@@ -56,7 +72,7 @@ export class Scope {
  * key-by-key. Returns a NEW object — does not mutate inputs.
  */
 export function mergeScopes<T extends {
-  user?: { id?: string; email?: string };
+  user?: AllStakUser;
   tags?: Record<string, string>;
   extras?: Record<string, unknown>;
   contexts?: Record<string, Record<string, unknown>>;

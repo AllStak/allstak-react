@@ -13,18 +13,24 @@
  * flush), `buffer` (rolling 60s in memory, flushed 60s-before + 30s-after on an
  * error), or `off`. Critical routes upgrade a session to continuous capture.
  *
- * Privacy-first: inputs masked by default, [type=password] always,
- * [data-allstak-mask] subtrees redacted, request URLs query-stripped, no
- * scripts recorded.
+ * Privacy-first: inputs masked by default, ALL TEXT masked by default
+ * (same-length `*`, opt out per element via the `unmask` selectors),
+ * [type=password] always, [data-allstak-mask] subtrees redacted, request URLs
+ * query-stripped, no scripts recorded. Everything that leaves via the replay
+ * stream (DOM text, click target text, console args, input values, attribute
+ * values) is additionally routed through the same PII value-scrubber used for
+ * error payloads.
  */
 
 import type { HttpTransport } from './transport';
-import { NodeIdMap, serializeNode, serializeAttributeValue, NodeKind, prefetchCrossOriginStyles, readCrossOriginStylesheet } from './replay-serialize';
+import { NodeIdMap, serializeNode, serializeAttributeValue, NodeKind, prefetchCrossOriginStyles, readCrossOriginStylesheet, maskOrScrubText, type SerializeOptions } from './replay-serialize';
+import { scrubString, type ValueScrubOptions } from './pii-scrub';
 
 type AddBreadcrumbFn = (type: string, msg: string, level?: string, data?: Record<string, unknown>) => void;
 
 const REPLAY_INGEST_PATH = '/ingest/v1/replay';
 const DEFAULT_MASK_ATTR = 'data-allstak-mask';
+const DEFAULT_UNMASK_ATTR_SELECTOR = '[data-allstak-unmask]';
 const DEFAULT_CRITICAL = ['/checkout', '/payment', '/signup', '/onboarding', '/billing'];
 
 export type ReplayMode = 'off' | 'session' | 'buffer';
@@ -37,7 +43,24 @@ export interface ReplayOptions {
   replayCriticalFlowSampleRate?: number;
   criticalFlows?: string[];
   maskAllInputs?: boolean;
+  /**
+   * Mask ALL text nodes (and click target text) with same-length `*`
+   * characters. Default **true** — page text (names, emails, balances, IDs)
+   * never ships unless an element is explicitly allowlisted via `unmask`.
+   */
+  maskAllText?: boolean;
+  /**
+   * CSS selectors whose subtree text is exempt from `maskAllText`. The
+   * `[data-allstak-unmask]` attribute is always honored in addition to these.
+   * `[data-allstak-mask]` (redaction) always wins over unmask.
+   */
+  unmask?: string[];
   maskAttribute?: string;
+  /**
+   * Options for the PII value-scrubber applied to everything that leaves via
+   * the replay stream. Wired by the client from `sendDefaultPii`. @internal
+   */
+  valueScrubOptions?: ValueScrubOptions;
   maxBufferedEvents?: number;
   bufferWindowMs?: number;
   postErrorMs?: number;
@@ -77,8 +100,9 @@ export class ReplayRecorder {
   private canvasTimer: ReturnType<typeof setInterval> | null = null; // GAP 3 (frame mode)
   private listeners: Array<{ t: string; fn: EventListener; cap: boolean; target: 'doc' | 'win' }> = [];
   private ids = new NodeIdMap();
-  private opts: Required<Omit<ReplayOptions, 'replayId' | 'release' | 'environment' | 'criticalFlows'>> & {
+  private opts: Required<Omit<ReplayOptions, 'replayId' | 'release' | 'environment' | 'criticalFlows' | 'valueScrubOptions'>> & {
     replayId: string; release?: string; environment?: string; criticalFlows: string[];
+    valueScrubOptions: ValueScrubOptions;
   };
   private sessionId: string;
   private mode: ReplayMode = 'off';
@@ -104,7 +128,10 @@ export class ReplayRecorder {
       replayCriticalFlowSampleRate: options.replayCriticalFlowSampleRate ?? 1,
       criticalFlows: options.criticalFlows ?? DEFAULT_CRITICAL,
       maskAllInputs: options.maskAllInputs ?? true,
+      maskAllText: options.maskAllText ?? true,
+      unmask: [...(options.unmask ?? []), DEFAULT_UNMASK_ATTR_SELECTOR],
       maskAttribute: options.maskAttribute ?? DEFAULT_MASK_ATTR,
+      valueScrubOptions: options.valueScrubOptions ?? {},
       maxBufferedEvents: options.maxBufferedEvents ?? 10_000,
       bufferWindowMs: options.bufferWindowMs ?? 60_000,
       postErrorMs: options.postErrorMs ?? 30_000,
@@ -175,11 +202,27 @@ export class ReplayRecorder {
 
   // ── full snapshot ─────────────────────────────────────────────────
 
+  /** The shared serialize/masking options for snapshot + mutation paths. */
+  private serializeOpts(): SerializeOptions {
+    return {
+      maskAllInputs: this.opts.maskAllInputs,
+      maskAttribute: this.opts.maskAttribute,
+      maskAllText: this.opts.maskAllText,
+      unmaskSelectors: this.opts.unmask,
+      scrubText: (value) => this.scrubText(value),
+    };
+  }
+
+  /** Same PII value-scrubber as the error path. Fail-open. */
+  private scrubText(value: string): string {
+    try { return scrubString(value, this.opts.valueScrubOptions); } catch { return value; }
+  }
+
   private takeFullSnapshot(reason: string): void {
     if (this.destroyed || this.mode === 'off') return;
     try {
       const root = document.documentElement ? document : document;
-      const node = serializeNode(document, this.ids, { maskAllInputs: this.opts.maskAllInputs, maskAttribute: this.opts.maskAttribute });
+      const node = serializeNode(document, this.ids, this.serializeOpts());
       if (!node) return;
       void root;
       this.snapshotTaken = true;
@@ -259,7 +302,7 @@ export class ReplayRecorder {
     this.observer = new MutationObserver((records) => {
       if (!this.snapshotTaken) { this.takeFullSnapshot('first-mutation'); return; }
       if (this.idleSince) return; // paused while idle
-      const opt = { maskAllInputs: this.opts.maskAllInputs, maskAttribute: this.opts.maskAttribute };
+      const opt = this.serializeOpts();
       const adds: Array<{ parentId: number; nextId: number; node: unknown }> = [];
       const removes: number[] = [];
       const attrs: Array<{ id: number; key: string; value: string | null }> = [];
@@ -272,7 +315,12 @@ export class ReplayRecorder {
         } else if (r.type === 'characterData') {
           const id = this.ids.getId(r.target);
           if (id < 0) continue;
-          texts.push({ id, value: r.target.nodeValue || '' });
+          // Live text mutations follow the exact same masking policy as the
+          // snapshot: [data-allstak-mask] redacts, maskAllText masks with
+          // same-length `*` unless unmasked, and whatever remains is scrubbed.
+          const parent = (r.target as CharacterData).parentElement ?? null;
+          const masked = !!parent?.closest?.(`[${this.opts.maskAttribute}]`);
+          texts.push({ id, value: maskOrScrubText(r.target.nodeValue || '', parent, masked, opt) });
         } else if (r.type === 'childList') {
           for (const removed of Array.from(r.removedNodes)) {
             const id = this.ids.getId(removed);
@@ -315,7 +363,12 @@ export class ReplayRecorder {
       if (!t) return;
       this.markActivity();
       const me = ev as MouseEvent;
-      this.push({ ts: Date.now(), k: 'click', data: { id: this.ids.getId(t), target: this.describePath(t), text: (t.textContent || '').trim().slice(0, 40), x: me.clientX ?? 0, y: me.clientY ?? 0 } });
+      // Click target text follows the text-masking policy (mask attribute →
+      // redact; maskAllText → same-length `*` unless unmasked; then scrubbed).
+      const opt = this.serializeOpts();
+      const clickMasked = !!t.closest?.(`[${this.opts.maskAttribute}]`);
+      const text = maskOrScrubText((t.textContent || '').trim().slice(0, 40), t, clickMasked, opt);
+      this.push({ ts: Date.now(), k: 'click', data: { id: this.ids.getId(t), target: this.describePath(t), text, x: me.clientX ?? 0, y: me.clientY ?? 0 } });
     };
     const onInput = (ev: Event) => {
       const t = this.eventTarget(ev) as HTMLInputElement | null;
@@ -370,7 +423,10 @@ export class ReplayRecorder {
       if (!orig) return;
       this.origConsole[level] = orig;
       (console as any)[level] = (...args: unknown[]) => {
-        try { this.push({ ts: Date.now(), k: 'console', data: { level, message: args.map((a) => this.stringifyArg(a)).join(' ').slice(0, 500) } }); } catch { /* ignore */ }
+        // Captured console args pass through the same PII value-scrubber as
+        // the error path BEFORE truncation (so a CC/SSN is never half-cut
+        // into an unrecognizable-but-leaking fragment).
+        try { this.push({ ts: Date.now(), k: 'console', data: { level, message: this.scrubText(args.map((a) => this.stringifyArg(a)).join(' ')).slice(0, 500) } }); } catch { /* ignore */ }
         return orig(...args);
       };
     });
@@ -415,7 +471,7 @@ export class ReplayRecorder {
 
   recordError(errorId: string, message: string, exceptionClass: string): void {
     if (this.mode === 'off') return;
-    this.push({ ts: Date.now(), k: 'err', data: { errorId, message: String(message).slice(0, 500), exceptionClass } });
+    this.push({ ts: Date.now(), k: 'err', data: { errorId, message: this.scrubText(String(message)).slice(0, 500), exceptionClass } });
     if (this.mode === 'buffer') {
       this.flush();
       this.unref(setTimeout(() => { if (!this.destroyed) this.flush(); }, this.opts.postErrorMs));
@@ -518,7 +574,8 @@ export class ReplayRecorder {
   private maskInputValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string {
     if ((el as HTMLInputElement).type === 'password') return '***';
     if (this.opts.maskAllInputs) return '***';
-    return String((el as any).value ?? '');
+    // Unmasked input values still pass through the PII value-scrubber.
+    return this.scrubText(String((el as any).value ?? ''));
   }
   private describePath(el: Element | null): string {
     if (!el || el.nodeType !== 1) return '';

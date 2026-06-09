@@ -38,7 +38,7 @@ export type { AllStakProviderProps } from './provider';
 
 // ── Core client + manual setup ──────────────────────────────────
 export { AllStak } from './client';
-export type { AllStakConfig, Breadcrumb, ErrorEventProcessor, SdkDiagnostics } from './client';
+export type { AllStakConfig, AllStakUser, Breadcrumb, ErrorEventProcessor, SdkDiagnostics } from './client';
 export type { TransportStats } from './transport';
 export { AllStakClient, INGEST_HOST, SDK_NAME, SDK_VERSION, Scope, __setForceSessionTrackingForTest } from './client';
 export { parseGitRelease, resolveRelease, releaseFromEnv, isNodeRuntime, __resetGitReleaseCacheForTest } from './release-detect';
@@ -127,6 +127,7 @@ export type { ValueScrubOptions, ScrubbablePayload } from './pii-scrub';
 // Exposed for unit-testing the Retry-After parser. Not part of the
 // public API contract.
 export { parseRetryAfter as __parseRetryAfterForTest } from './transport';
+export { isInsecureIngestUrl, assertSecureIngestUrl } from './transport';
 
 // ── Offline / persistent event queue ────────────────────────────
 // `OfflineStore` is wired automatically by the client (default ON in the

@@ -28,7 +28,9 @@ const { AllStak } = await import('../dist/index.mjs');
 
 test('scope user/tag/extra is applied inside withScope and removed after', async () => {
   sent.length = 0;
-  AllStak.init({ apiKey: 'k' });
+  // sendDefaultPii: true — this test asserts scope ISOLATION of the full user
+  // object; the privacy-by-default email drop is covered in pii-value-scrubbing.
+  AllStak.init({ apiKey: 'k', sendDefaultPii: true });
 
   AllStak.withScope((scope) => {
     scope.setUser({ id: 'u-A', email: 'a@x.com' });

@@ -11,7 +11,9 @@
  *   B) Scrubbed UNLESS sendDefaultPii === true (default false = parity):
  *      - Email addresses, IPv4.
  *
- * Plus: the explicit setUser object is NEVER scrubbed; key-based redaction
+ * Plus: privacy-by-default — with sendDefaultPii=false the user's
+ * email/username/name/ip fields are DROPPED before the wire (id kept), and
+ * the user subtree is value-scrubbed like any other; key-based redaction
  * still works; stack frame paths are NOT corrupted; and the scrubbers are
  * fail-open on pathological input.
  *
@@ -218,9 +220,9 @@ test('wire: email/IP PRESERVED with sendDefaultPii=true, but CC/SSN still scrubb
   assert.equal(body.metadata.card, '[REDACTED]');
 });
 
-test('wire: explicit setUser email is NOT scrubbed (intentional identification)', async () => {
+test('wire: setUser email ships ONLY with the sendDefaultPii=true opt-in', async () => {
   sent.length = 0;
-  AllStak.init({ apiKey: 'ask_test_key', release: 'web@1.0.0' });
+  AllStak.init({ apiKey: 'ask_test_key', release: 'web@1.0.0', sendDefaultPii: true });
   AllStak.setUser({ id: 'u-1', email: 'real.user@example.com' });
   AllStak.captureException(new Error('boom'));
   await wait();
@@ -229,16 +231,36 @@ test('wire: explicit setUser email is NOT scrubbed (intentional identification)'
   assert.deepEqual(body.user, { id: 'u-1', email: 'real.user@example.com' });
 });
 
-test('wire: explicit setUser email survives even with sendDefaultPii=false default', async () => {
-  // sendDefaultPii does NOT strip an explicitly set user.
+test('wire: privacy-by-default drops user email/username/name/ip — id is kept', async () => {
+  // With sendDefaultPii=false (the default) the PII fields of an explicitly
+  // set user are DROPPED before the wire; the pseudonymous id ships.
   sent.length = 0;
   AllStak.init({ apiKey: 'ask_test_key', release: 'web@1.0.0', sendDefaultPii: false });
-  AllStak.setUser({ id: 'u-2', email: 'explicit@corp.io' });
+  AllStak.setUser({
+    id: 'u-2',
+    email: 'explicit@corp.io',
+    username: 'jdoe',
+    name: 'John Doe',
+    ip_address: '203.0.113.7',
+    plan: 'enterprise',
+  });
   AllStak.captureException(new Error('e2'));
   await wait();
   const body = JSON.parse(sent.find(errorsPath).init.body);
   AllStak.destroy();
-  assert.equal(body.user.email, 'explicit@corp.io');
+  assert.deepEqual(body.user, { id: 'u-2', plan: 'enterprise' },
+    'email/username/name/ip dropped; id + custom fields kept');
+});
+
+test('wire: user is dropped entirely when only PII fields were set (default)', async () => {
+  sent.length = 0;
+  AllStak.init({ apiKey: 'ask_test_key', release: 'web@1.0.0' });
+  AllStak.setUser({ email: 'only.pii@corp.io', name: 'Jane' });
+  AllStak.captureException(new Error('e3'));
+  await wait();
+  const body = JSON.parse(sent.find(errorsPath).init.body);
+  AllStak.destroy();
+  assert.equal(body.user, undefined, 'a PII-only user must vanish by default');
 });
 
 test('wire: breadcrumb message + data are scrubbed', async () => {
@@ -303,7 +325,8 @@ test('wire: beforeSend cannot reintroduce credentials or private values', async 
   assert.equal(body.metadata.nested.values[1].secret, '[REDACTED]');
   assert.equal(body.metadata.card, '[REDACTED]');
   assert.equal(body.requestContext.headers['Set-Cookie'], '[REDACTED]');
-  assert.equal(body.user.email, 'keep@example.com', 'explicit user identity survives');
+  assert.equal(body.user.email, undefined, 'beforeSend cannot reintroduce user email (privacy-by-default)');
+  assert.equal(body.user.id, 'u-1', 'pseudonymous user id survives');
   assert.equal(body.user.password, '[REDACTED]');
   assert.equal(body.breadcrumbs.at(-1).message, '[REDACTED]');
   assert.equal(body.breadcrumbs.at(-1).data.token, '[REDACTED]');
@@ -390,7 +413,9 @@ test('scrubEventValues: only allowlisted carriers are touched', () => {
   // Allowlisted-skip fields untouched:
   assert.equal(out.release, 'web@1.0.0');
   assert.equal(out.sessionId, 'sess-a@b.com-id');
-  assert.deepEqual(out.user, { id: 'u', email: 'keep@me.com', password: '[REDACTED]' });
+  // The user subtree is no longer exempt from the value scrubber: with the
+  // default sendDefaultPii=false, email literals are redacted like any value.
+  assert.deepEqual(out.user, { id: 'u', email: '[REDACTED]', password: '[REDACTED]' });
   assert.equal(out.requestContext.headers.Authorization, '[REDACTED]');
   assert.equal(out.fingerprint[0], '[REDACTED]');
 });
@@ -402,4 +427,24 @@ test('makeValueScrubberProcessor honors sendDefaultPii', () => {
   assert.equal(on({ message: 'a@b.com' }).message, 'a@b.com');
   // CC always scrubbed regardless.
   assert.equal(on({ message: '4111111111111111' }).message, '[REDACTED]');
+});
+
+// ── F5: prototype-pollution key guard ────────────────────────────
+
+test('scrubDeep drops __proto__ / constructor / prototype keys', () => {
+  // Raw JSON so the dangerous keys are real OWN properties (an object literal
+  // with `__proto__:` in source would set the prototype instead).
+  const hostile = JSON.parse(
+    '{"a":"ok","__proto__":{"polluted":true},"constructor":{"evil":1},"prototype":{"x":2},"nested":{"__proto__":{"deep":true},"b":"fine"}}',
+  );
+  const out = scrubDeep(hostile);
+  assert.equal(out.a, 'ok');
+  assert.equal(out.nested.b, 'fine');
+  assert.ok(!Object.keys(out).includes('__proto__'), '__proto__ key is dropped');
+  assert.ok(!Object.keys(out).includes('constructor'), 'constructor key is dropped');
+  assert.ok(!Object.keys(out).includes('prototype'), 'prototype key is dropped');
+  assert.ok(!Object.keys(out.nested).includes('__proto__'), 'nested __proto__ key is dropped');
+  assert.equal(Object.getPrototypeOf(out), Object.prototype, 'output prototype is untouched');
+  assert.equal(out.polluted, undefined, 'no value smuggled via the prototype slot');
+  assert.equal({}.polluted, undefined, 'global Object.prototype is not polluted');
 });

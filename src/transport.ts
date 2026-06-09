@@ -34,6 +34,71 @@ function isPersistablePath(path: string): boolean {
   return !NON_PERSISTABLE_PATHS.includes(path);
 }
 
+// ── C1: HTTPS enforcement ────────────────────────────────────────
+
+/** Loopback hosts where plaintext `http://` is acceptable for local dev. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
+
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return LOOPBACK_HOSTS.has(h) || h.endsWith('.localhost');
+}
+
+/**
+ * True when `url` would carry telemetry (and the project ingest key) in
+ * cleartext to a non-loopback destination, or uses a non-http(s) scheme.
+ * Relative URLs (no scheme — e.g. a same-origin `tunnel: '/allstak-tunnel'`)
+ * inherit the page's scheme and are considered safe here.
+ */
+export function isInsecureIngestUrl(url: string): boolean {
+  if (typeof url !== 'string' || url.length === 0) return false;
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url.trim());
+  if (!scheme) return false; // relative URL — same-origin, inherits page scheme
+  const proto = scheme[1]!.toLowerCase();
+  if (proto === 'https') return false;
+  if (proto !== 'http') return true; // ws:, ftp:, file:, … are never valid ingest schemes
+  try {
+    return !isLoopbackHostname(new URL(url.trim()).hostname);
+  } catch {
+    return true; // unparseable http URL — reject
+  }
+}
+
+/**
+ * Validate an ingest host/tunnel URL at init time. Throws a `TypeError` for an
+ * insecure non-loopback `http://` URL (or non-http(s) scheme) unless the
+ * `allowInsecureHost` escape hatch is set, in which case a LOUD console
+ * warning is emitted instead. `https://` and loopback `http://` pass silently.
+ */
+export function assertSecureIngestUrl(url: string | undefined, allowInsecureHost: boolean): void {
+  if (!url || !isInsecureIngestUrl(url)) return;
+  if (allowInsecureHost) {
+    try {
+      console.warn(
+        `AllStak: allowInsecureHost is enabled — telemetry (including the project ingest key) ` +
+          `will be sent over PLAINTEXT http to '${url}'. Only use this on trusted internal ` +
+          `networks; never in production.`,
+      );
+    } catch { /* never break init over a console */ }
+    return;
+  }
+  throw new TypeError(
+    `AllStak: insecure ingest host '${url}' rejected. Use https:// (or set allowInsecureHost: true for trusted internal networks).`,
+  );
+}
+
+/**
+ * Thrown by the transport's defense-in-depth check when a send would target an
+ * insecure URL without the escape hatch. Treated as permanently undeliverable
+ * (dropped, never retried or persisted) — the transport stays fail-open.
+ */
+class InsecureTransportError extends Error {
+  constructor(url: string) {
+    super(`AllStak: refusing to send telemetry to insecure URL '${url}'`);
+    this.name = 'InsecureTransportError';
+  }
+}
+
 /**
  * Error thrown for a non-2xx HTTP response, carrying the status and the
  * server's `Retry-After` header (when present) so the retry/circuit-breaker
@@ -78,6 +143,12 @@ export interface HttpTransportOptions {
    * existing in-memory-only behavior.
    */
   offlineStore?: OfflineStore;
+  /**
+   * Escape hatch for trusted internal networks: permit plaintext `http://` to
+   * non-loopback hosts. Mirrors `AllStakConfig.allowInsecureHost`. Without it
+   * the transport refuses (drops) any send targeting an insecure URL.
+   */
+  allowInsecureHost?: boolean;
 }
 
 export interface TransportStats {
@@ -219,6 +290,7 @@ export class HttpTransport {
    * retryable.
    */
   private isPermanentDrop(error: unknown): boolean {
+    if (error instanceof InsecureTransportError) return true;
     return (
       error instanceof HttpResponseError &&
       error.status >= 400 &&
@@ -253,6 +325,12 @@ export class HttpTransport {
 
   private async doFetch(path: string, payload: unknown, timeoutMs = REQUEST_TIMEOUT): Promise<void> {
     const url = this.options.tunnel || `${this.baseUrl}${path}`;
+    // C1 defense-in-depth: init() already validated host/tunnel; refuse here
+    // too so the key + telemetry can never leave over plaintext http to a
+    // non-loopback destination unless explicitly allowed.
+    if (this.options.allowInsecureHost !== true && isInsecureIngestUrl(url)) {
+      throw new InsecureTransportError(url);
+    }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const bodyJson = JSON.stringify(this.options.tunnel ? { path, payload } : payload);

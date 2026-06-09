@@ -179,11 +179,15 @@ export class OfflineStore {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Defensively keep only well-formed entries.
-    return parsed.filter(
-      (e): e is PersistedEvent =>
-        e && typeof e.id === 'string' && typeof e.path === 'string' && typeof e.ts === 'number',
-    );
+    // Defensively keep only well-formed entries, and REBUILD each one from the
+    // known fields so a tampered store cannot smuggle extra keys (including
+    // prototype-pollution keys like `__proto__`) back into the pipeline.
+    return parsed
+      .filter(
+        (e): e is PersistedEvent =>
+          e && typeof e.id === 'string' && typeof e.path === 'string' && typeof e.ts === 'number',
+      )
+      .map((e) => ({ id: e.id, path: e.path, payload: e.payload, ts: e.ts }));
   }
 
   private write(entries: PersistedEvent[]): void {

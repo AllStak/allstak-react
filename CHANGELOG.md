@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Session replay is now fully masked by default (C3).** New `maskAllText`
+  replay option, **default `true`**: every DOM text node (and click target
+  text) is masked with same-length `*` characters, preserving layout. Replay
+  remains enabled by default only because of this. Allowlist specific elements
+  with the new `unmask` CSS-selector option or the `data-allstak-unmask`
+  attribute (`data-allstak-mask` always wins over unmask). `replayIntegration()`
+  accepts `maskAllText` / `unmask` for Sentry parity.
+- **The entire replay stream now passes through the same PII value-scrubber as
+  the error path (C3).** Serialized DOM text, live text mutations, click target
+  text, captured `console.*` args, unmasked input values, and attribute values
+  (placeholder/title/alt/…) are scrubbed before leaving the client — credit
+  cards/SSNs always, email/IP unless `sendDefaultPii: true`. Previously the
+  replay channel bypassed value scrubbing entirely.
+- **HTTPS is enforced for `host` and `tunnel` (C1).** `init()` now throws a
+  `TypeError` for a plaintext `http://` ingest host or tunnel (or a non-http(s)
+  scheme) unless the host is loopback (`localhost`, `127.0.0.1`, `::1`,
+  `0.0.0.0`, `*.localhost`). New `allowInsecureHost: true` escape hatch accepts
+  http for trusted internal networks with a loud console warning. The transport
+  re-checks every send (defense in depth) and drops insecure sends.
+- **Privacy by default for the user object (C2).** With `sendDefaultPii`
+  falsy (the default), the `email`, `username`, `name`, and `ip`/`ip_address`
+  fields of the user set via config/`setUser`/scopes are dropped before the
+  wire — only the pseudonymous `id` (plus custom fields) ships, re-applied
+  after `beforeSend`/event processors so hooks cannot reintroduce them. The
+  `user` subtree is no longer exempt from the value scrubber. Set
+  `sendDefaultPii: true` to restore the previous behavior.
+- **Prototype-pollution key guard.** `scrubDeep` drops literal
+  `__proto__`/`constructor`/`prototype` keys, and the offline store rebuilds
+  persisted entries from known fields only.
+
+### Added
+
+- `allowInsecureHost` config option, `AllStakUser` type (with
+  `username`/`name`/`ip_address` fields), replay `maskAllText` + `unmask`
+  options, and exported `isInsecureIngestUrl` / `assertSecureIngestUrl`
+  helpers.
+
 ## [0.6.0] — 2026-06-04
 
 ### Added

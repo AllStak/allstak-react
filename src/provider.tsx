@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { AllStak, AllStakClient } from './client';
-import type { AllStakConfig } from './client';
+import type { AllStakConfig, AllStakUser } from './client';
 
 export interface AllStakProviderProps {
   children: React.ReactNode;
@@ -9,7 +9,7 @@ export interface AllStakProviderProps {
   release?: string;
   host?: string;
   tunnel?: string;
-  user?: { id?: string; email?: string };
+  user?: AllStakUser;
   tags?: Record<string, string>;
   debug?: boolean;
   /**
@@ -313,7 +313,7 @@ export function useAllStak() {
         msg: string,
         level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
       ) => AllStak.captureMessage(msg, level),
-      setUser: (user: { id?: string; email?: string }) => AllStak.setUser(user),
+      setUser: (user: AllStakUser) => AllStak.setUser(user),
       setTag: (key: string, value: string) => AllStak.setTag(key, value),
       setContext: (name: string, ctx: Record<string, unknown> | null) =>
         AllStak.setContext(name, ctx),

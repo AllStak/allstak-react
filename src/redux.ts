@@ -11,6 +11,7 @@
  */
 
 import { AllStak } from './client';
+import type { AllStakUser } from './client';
 
 interface ReduxAction {
   type?: unknown;
@@ -40,7 +41,7 @@ function scopeProxy() {
       AllStak.setContext(name, ctx),
     setExtra: (key: string, value: unknown) => AllStak.setExtra(key, value),
     setExtras: (extras: Record<string, unknown>) => AllStak.setExtras(extras),
-    setUser: (user: { id?: string; email?: string }) => AllStak.setUser(user),
+    setUser: (user: AllStakUser) => AllStak.setUser(user),
     setLevel: (level: 'fatal' | 'error' | 'warning' | 'info' | 'debug') =>
       AllStak.setLevel(level),
     setFingerprint: (fingerprint: string[]) => AllStak.setFingerprint(fingerprint),

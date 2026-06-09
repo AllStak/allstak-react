@@ -23,9 +23,8 @@
  * Everything is replaced with `[REDACTED]`.
  *
  * The caller is responsible for the field allowlist (do NOT scrub stack
- * frame paths, release/sdk fields, URLs, the explicit `setUser` object, or
- * the SDK's own `sessionId`). This module only scrubs the string values it
- * is handed.
+ * frame paths, release/sdk fields, URLs, or the SDK's own `sessionId`). This
+ * module only scrubs the string values it is handed.
  *
  * Performance: regexes are compiled once at module load. Recursion depth and
  * scanned-string length are capped; oversized strings are left untouched
@@ -238,6 +237,14 @@ export function scrubDeep<T>(value: T, opts: ValueScrubOptions = {}, depth = 0):
     let changed = false;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // Guard prototype-pollution keys: walking attacker-influenceable data
+      // (HTTP headers, console-logged objects) must never assign the
+      // `__proto__`/`constructor`/`prototype` slot of the rebuilt object.
+      // Such keys are dropped entirely.
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
+        changed = true;
+        continue;
+      }
       if (isSensitiveKey(k)) {
         changed = true;
         out[k] = REDACTED;
@@ -274,7 +281,6 @@ export interface ScrubbablePayload {
   fingerprint?: string[];
   // Fields we DELIBERATELY never touch are not read here, but listing the
   // common ones documents intent for future maintainers:
-  //   user (explicit setUser — intentional identification, ships as-is)
   //   frames / stackTrace (filename / function / absPath)
   //   release / sdkName / sdkVersion / dist / environment / platform
   //   traceId / spanId / sessionId / requestId / eventId / fingerprint
@@ -289,7 +295,7 @@ export interface ScrubbablePayload {
  *   - `message`            (error/exception message)
  *   - `metadata`           (extras / tags / contexts / per-call context)
  *   - `requestContext`
- *   - `user`               (key/value secrets only; explicit email/id survive)
+ *   - `user`               (value-scrubbed like every other subtree)
  *   - `fingerprint`
  *   - `breadcrumbs[].message` + `breadcrumbs[].data`
  *
@@ -313,7 +319,11 @@ export function scrubEventValues<T extends ScrubbablePayload>(
       event.requestContext = scrubDeep(event.requestContext, opts);
     }
     if (event.user && typeof event.user === 'object') {
-      event.user = scrubDeep(event.user, { ...opts, sendDefaultPii: true });
+      // The user subtree is NOT exempt from value scrubbing: with the default
+      // sendDefaultPii=false, email/IP literals inside user fields are
+      // redacted like any other value (CC/SSN always). The PII field drop
+      // (email/username/name/ip) happens upstream in the client wire path.
+      event.user = scrubDeep(event.user, opts);
     }
     if (Array.isArray(event.fingerprint)) {
       event.fingerprint = event.fingerprint.map((part) => scrubString(String(part), opts));
